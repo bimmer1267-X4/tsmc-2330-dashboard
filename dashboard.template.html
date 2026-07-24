@@ -90,6 +90,22 @@
   <div class="metrics" id="metrics-grid"></div>
 </div>
 
+<div class="card" id="open-prediction-card">
+  <div style="font-weight:600; margin-bottom:2px;">今日台股開盤價機率預估</div>
+  <div class="sub">依近6個月「ADR隔夜漲跌% → 台股開盤缺口%」歷史迴歸模型，套用今天的ADR變動推估</div>
+  <div class="header-row">
+    <div>
+      <div class="hero" id="prediction-price" style="font-size:36px;">--</div>
+      <div><span class="delta" id="prediction-delta"></span></div>
+    </div>
+    <div>
+      <span class="zone-badge" id="prediction-prob-badge">--</span>
+    </div>
+  </div>
+  <div class="metrics" id="prediction-metrics"></div>
+  <div class="src" id="prediction-model-note"></div>
+</div>
+
 <div class="card">
   <div style="font-weight:600; margin-bottom:8px;">估值分區框架（本益比為主軸，技術面／ADR溢價為輔助修正）</div>
   <div class="zones-grid" id="zones-grid"></div>
@@ -178,6 +194,45 @@
     const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
     d.appendChild(l); d.appendChild(v); mg.appendChild(d);
   });
+
+  // ---- 今日台股開盤價機率預估 ----
+  (function(){
+    const pred = raw.openPrediction;
+    const card = document.getElementById('open-prediction-card');
+    if (!pred) { card.style.display = 'none'; return; }
+
+    document.getElementById('prediction-price').textContent = fmt(pred.predictedOpen,0);
+    const dEl = document.getElementById('prediction-delta');
+    dEl.textContent = (pred.predictedGapPct>=0?'+':'') + fmt(pred.predictedGapPct,2) + '%（缺口）';
+    dEl.className = 'delta ' + (pred.predictedGapPct>=0?'up':'down');
+
+    const probBadge = document.getElementById('prediction-prob-badge');
+    const up = pred.probUpPct;
+    probBadge.textContent = '上漲機率 ' + fmt(up,1) + '%';
+    const probKey = up>=60 ? 'good' : (up<=40 ? 'critical' : 'muted');
+    const probColorVar = probKey==='muted' ? 'var(--text-secondary)' : 'var(--'+probKey+')';
+    probBadge.style.background = probKey==='muted' ? 'var(--grid)' : (probColorVar+'22');
+    probBadge.style.color = probColorVar;
+
+    const m = pred.model;
+    const predMetrics = [
+      ['68%信賴區間', fmt(pred.ci68.low,0)+' ~ '+fmt(pred.ci68.high,0)+' 元'],
+      ['95%信賴區間', fmt(pred.ci95.low,0)+' ~ '+fmt(pred.ci95.high,0)+' 元'],
+      ['依據ADR隔夜漲跌', (pred.basisAdrChangePct>=0?'+':'')+fmt(pred.basisAdrChangePct,2)+'%'],
+      ['模型解釋力 R²', fmt(m.r2,2)],
+      ['歷史方向一致率', fmt(m.hitRatePct,1)+'%'],
+      ['訓練樣本數', m.sampleSize+' 筆（近'+m.windowMonths+'個月）']
+    ];
+    const pmg = document.getElementById('prediction-metrics');
+    predMetrics.forEach(([label,value]) => {
+      const d = document.createElement('div');
+      const l = document.createElement('div'); l.className='metric-label'; l.textContent = label;
+      const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
+      d.appendChild(l); d.appendChild(v); pmg.appendChild(d);
+    });
+    document.getElementById('prediction-model-note').textContent =
+      '模型：開盤缺口% = ' + fmt(m.beta,3) + ' × ADR漲跌% + ' + fmt(m.alpha,3) + '（OLS迴歸，殘差標準差 ' + fmt(m.residualStd,2) + '%，假設常態分布估算機率）。⚠️ 純統計關係，不構成投資建議，不保證準確，實際開盤仍以台股交易所公告為準。';
+  })();
 
   const zoneColorKey = {'便宜價':'good','甜甜價':'sweet','正常':'muted','超貴價':'critical'};
   function renderZoneCards(containerId, thresholds, activeZoneName) {

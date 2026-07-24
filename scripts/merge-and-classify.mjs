@@ -2,6 +2,8 @@
 // 自動改用 Yahoo Finance 單一來源抓取，供排程自動化使用）進 data.json，
 // 並依「估值分區框架」計算目前價格所屬區間：便宜價／甜甜價／正常／超貴價，
 // 以及「全年預估EPS」(config.json) 換算的 Forward PE / PEG 分區。
+// 同時用近6個月 ADR/匯率/台股歷史資料訓練「ADR隔夜漲跌% → 台股開盤缺口%」OLS迴歸，
+// 套用在今天的ADR變動上，機率性推估台股開盤價（含68%/95%信賴區間、上漲機率）。
 // 跨平台版本 (Node.js)，邏輯與 merge-and-classify.ps1 對等。
 //
 // 用法（手動交叉比對）：
@@ -20,6 +22,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = join(__dirname, "..", "data", "data.json");
 const CONFIG_PATH = join(__dirname, "..", "data", "config.json");
 const YF_UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
+const REGRESSION_WINDOW = "6mo";
+const REGRESSION_WINDOW_MONTHS = 6;
+const MIN_REGRESSION_SAMPLES = 20;
 
 function parseArgs(argv) {
   const out = {};
@@ -33,42 +38,138 @@ function parseArgs(argv) {
   return out;
 }
 
-async function fetchYahooQuote(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
+// 抓取 Yahoo Finance 每日收盤序列。除了回傳最新報價(price/changePct/quoteTime)，也回傳
+// 完整每日收盤序列(series/map)，供「ADR vs 開盤缺口」迴歸訓練使用，避免重複發送請求。
+async function fetchYahooDaily(symbol, range = REGRESSION_WINDOW) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=${range}`;
   const res = await fetch(url, { headers: { "User-Agent": YF_UA } });
   if (!res.ok) throw new Error(`Yahoo Finance HTTP ${res.status} for ${symbol}`);
   const json = await res.json();
   const result = json?.chart?.result?.[0];
   if (!result?.meta) throw new Error(`Yahoo Finance 無資料: ${symbol}`);
-  const { meta } = result;
-  const price = meta.regularMarketPrice;
+  const { meta, timestamp = [] } = result;
+  const rawCloses = result.indicators?.quote?.[0]?.close ?? [];
 
+  // 用美東時區(ADR/FX主要交易時區)把時間戳轉成交易日期字串，作為序列比對用的 key。
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+  const series = [];
+  const map = new Map();
+  for (let i = 0; i < timestamp.length; i++) {
+    if (rawCloses[i] == null) continue;
+    const dateStr = fmt.format(new Date(timestamp[i] * 1000));
+    series.push({ date: dateStr, close: rawCloses[i] });
+    map.set(dateStr, rawCloses[i]);
+  }
+
+  const price = meta.regularMarketPrice;
   // meta.previousClose 常缺失，meta.chartPreviousClose 則是查詢範圍(range)起點之前的收盤價，
   // 不一定是「前一個交易日」，用它算漲跌%可能落差好幾天而算錯。改為直接從每日收盤價序列
   // 取倒數第二個有效值（= 真正的前一交易日收盤），確保漲跌%永遠是逐日比較。
-  const closes = result.indicators?.quote?.[0]?.close ?? [];
-  const validCloses = closes.filter((c) => c != null);
-  const previousClose = validCloses.length >= 2 ? validCloses[validCloses.length - 2] : (meta.previousClose ?? meta.chartPreviousClose);
-
+  const closes = series.map((s) => s.close);
+  const previousClose = closes.length >= 2 ? closes[closes.length - 2] : (meta.previousClose ?? meta.chartPreviousClose);
   const changePct = previousClose ? Math.round((price / previousClose - 1) * 10000) / 100 : null;
   const quoteTime = new Date(meta.regularMarketTime * 1000).toISOString();
-  return { price, changePct, quoteTime };
+  return { price, changePct, quoteTime, series, map };
 }
 
 // 排程自動化用：單一來源（Yahoo Finance），非人工交叉比對，僅供無法互動時的 fallback。
-async function autoFetchAdrAndFx() {
+async function autoFetchAdrAndFx(adrDaily, fxDaily) {
   console.log("未提供 --adr-price/--usd-twd 等參數，改用 Yahoo Finance 自動抓取 ADR(TSM) 與 USD/TWD...");
-  const [adr, fx] = await Promise.all([fetchYahooQuote("TSM"), fetchYahooQuote("TWD=X")]);
   return {
-    adrPrice: adr.price,
-    adrChangePct: adr.changePct,
-    adrQuoteTime: adr.quoteTime,
-    usdTwd: fx.price,
-    fxQuoteTime: fx.quoteTime,
+    adrPrice: adrDaily.price,
+    adrChangePct: adrDaily.changePct,
+    adrQuoteTime: adrDaily.quoteTime,
+    usdTwd: fxDaily.price,
+    fxQuoteTime: fxDaily.quoteTime,
     sources: ["query1.finance.yahoo.com (TSM)"],
     fxSource: "query1.finance.yahoo.com (TWD=X)",
   };
 }
+
+// ---- 統計小工具 ----
+function mean(a) { return a.reduce((x, y) => x + y, 0) / a.length; }
+function stddev(a) { const m = mean(a); return Math.sqrt(mean(a.map((x) => (x - m) ** 2))); }
+
+function olsRegression(xs, ys) {
+  const n = xs.length;
+  const mx = mean(xs), my = mean(ys);
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = xs[i] - mx, dy = ys[i] - my;
+    sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+  }
+  const beta = sxy / sxx;
+  const alpha = my - beta * mx;
+  const r = sxy / Math.sqrt(sxx * syy);
+  return { beta, alpha, r, r2: r * r, n };
+}
+
+// 標準常態分布 CDF（Abramowitz & Stegun 7.1.26 近似），用來把「預估缺口% / 殘差標準差」
+// 換算成「開盤上漲的機率」。
+function erf(x) {
+  const sign = x < 0 ? -1 : 1;
+  x = Math.abs(x);
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const t = 1 / (1 + p * x);
+  const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return sign * y;
+}
+function normalCdf(z) { return 0.5 * (1 + erf(z / Math.SQRT2)); }
+
+function nearestOnOrBefore(map, sortedDates, date) {
+  let lo = 0, hi = sortedDates.length - 1, ans = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (sortedDates[mid] <= date) { ans = sortedDates[mid]; lo = mid + 1; } else hi = mid - 1;
+  }
+  return ans == null ? null : map.get(ans);
+}
+
+// 用近6個月 ADR(TSM)/USD-TWD/台股日K，訓練「ADR單日漲跌% → 台股隔日開盤缺口%」OLS迴歸。
+// adrSeries/fxSeries: [{date, close}]（date為美東交易日期字串）；twDaily: data.json 的 daily 陣列。
+function buildOpenGapModel(adrSeries, fxSeries, twDaily) {
+  const adrMap = new Map(adrSeries.map((s) => [s.date, s.close]));
+  const adrDates = adrSeries.map((s) => s.date);
+  const fxMap = new Map(fxSeries.map((s) => [s.date, s.close]));
+  const fxDates = fxSeries.map((s) => s.date).sort();
+  const adrRatio = 5;
+
+  const pairs = [];
+  for (let i = 1; i < adrDates.length; i++) {
+    const D = adrDates[i], Dprev = adrDates[i - 1];
+    const adrClose = adrMap.get(D), adrClosePrev = adrMap.get(Dprev);
+    const adrChangePct = (adrClose / adrClosePrev - 1) * 100;
+
+    const fx = nearestOnOrBefore(fxMap, fxDates, D);
+    if (fx == null) continue;
+
+    let tIdx = -1;
+    for (let j = 0; j < twDaily.length; j++) {
+      if (twDaily[j].date > D) { tIdx = j; break; }
+    }
+    if (tIdx <= 0) continue;
+    const T = twDaily[tIdx], Tprev = twDaily[tIdx - 1];
+    const twOpenGapPct = (T.open / Tprev.close - 1) * 100;
+
+    pairs.push({ twDate: T.date, adrChangePct, twOpenGapPct });
+  }
+
+  // 同一台股交易日可能對應多個ADR日期（例如週一對應上週五+週末），只留每個台股交易日最後一筆。
+  const byTwDate = new Map();
+  for (const p of pairs) byTwDate.set(p.twDate, p);
+  const uniq = [...byTwDate.values()];
+  if (uniq.length < MIN_REGRESSION_SAMPLES) return null;
+
+  const xs = uniq.map((p) => p.adrChangePct), ys = uniq.map((p) => p.twOpenGapPct);
+  const reg = olsRegression(xs, ys);
+  const residuals = uniq.map((p) => p.twOpenGapPct - (reg.beta * p.adrChangePct + reg.alpha));
+  const residualStd = stddev(residuals);
+  const hitRate = uniq.filter((p) => Math.sign(p.adrChangePct) === Math.sign(p.twOpenGapPct) && p.adrChangePct !== 0).length / uniq.length;
+
+  return { ...reg, residualStd, hitRate };
+}
+
+function round(v, d) { const f = 10 ** d; return Math.round(v * f) / f; }
 
 function classifyZone(pe, rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60, peLabel) {
   const reasons = [];
@@ -104,8 +205,21 @@ async function main() {
   let sources = ["stockanalysis.com", "finance.yahoo.com"];
   let fxSource = "tw.stock.yahoo.com USDTWD=X";
 
+  // 近6個月 ADR/匯率歷史序列：無論今天的ADR/匯率是手動交叉比對還是自動抓取，都需要
+  // 這份歷史資料來訓練「ADR vs 台股開盤缺口」迴歸模型，所以固定抓取。
+  let adrDaily = null, fxDaily = null;
+  try {
+    [adrDaily, fxDaily] = await Promise.all([fetchYahooDaily("TSM"), fetchYahooDaily("TWD=X")]);
+  } catch (e) {
+    console.warn("抓取 ADR/匯率近6個月歷史序列失敗，將略過開盤價機率預估: " + e.message);
+  }
+
   if (!adrPrice || !adrQuoteTime || !usdTwd || !fxQuoteTime) {
-    const auto = await autoFetchAdrAndFx();
+    if (!adrDaily || !fxDaily) {
+      console.error("缺少必要參數且自動抓取失敗：--adr-price --adr-change-pct --adr-quote-time --usd-twd --fx-quote-time");
+      process.exit(1);
+    }
+    const auto = await autoFetchAdrAndFx(adrDaily, fxDaily);
     adrPrice = auto.adrPrice;
     adrChangePct = auto.adrChangePct;
     adrQuoteTime = auto.adrQuoteTime;
@@ -206,6 +320,43 @@ async function main() {
     };
   } catch (e) {
     console.warn("config.json 讀取或計算失敗，略過官方預估區塊: " + e.message);
+  }
+
+  // ---- 台股開盤價機率預估（依近6個月「ADR漲跌% → 開盤缺口%」迴歸模型） ----
+  if (adrDaily && fxDaily) {
+    try {
+      const model = buildOpenGapModel(adrDaily.series, fxDaily.series, d.daily);
+      if (model) {
+        const predictedGapPct = model.beta * adrChangePct + model.alpha;
+        const base = d.valuation.closePrice;
+        const priceAt = (gapPct) => round(base * (1 + gapPct / 100), 2);
+        const probUpPct = round(normalCdf(predictedGapPct / model.residualStd) * 100, 1);
+
+        d.openPrediction = {
+          predictedGapPct: round(predictedGapPct, 2),
+          predictedOpen: priceAt(predictedGapPct),
+          ci68: { low: priceAt(predictedGapPct - model.residualStd), high: priceAt(predictedGapPct + model.residualStd) },
+          ci95: { low: priceAt(predictedGapPct - 1.96 * model.residualStd), high: priceAt(predictedGapPct + 1.96 * model.residualStd) },
+          probUpPct,
+          basisAdrChangePct: adrChangePct,
+          basisPrevClose: base,
+          model: {
+            beta: round(model.beta, 4),
+            alpha: round(model.alpha, 4),
+            r2: round(model.r2, 4),
+            residualStd: round(model.residualStd, 4),
+            hitRatePct: round(model.hitRate * 100, 1),
+            sampleSize: model.n,
+            windowMonths: REGRESSION_WINDOW_MONTHS,
+          },
+        };
+        console.log(`開盤價機率預估: 缺口${d.openPrediction.predictedGapPct}%  預估開盤價${d.openPrediction.predictedOpen}  上漲機率${probUpPct}%（R²=${model.r2.toFixed(2)}, n=${model.n}）`);
+      } else {
+        console.warn(`可用配對樣本數不足(<${MIN_REGRESSION_SAMPLES})，略過開盤價機率預估`);
+      }
+    } catch (e) {
+      console.warn("開盤價機率預估計算失敗，略過: " + e.message);
+    }
   }
 
   await writeFile(DATA_PATH, JSON.stringify(d), "utf8");
