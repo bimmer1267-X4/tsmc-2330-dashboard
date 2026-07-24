@@ -2,6 +2,8 @@
   合併 ADR / 匯率資料（由 Claude 透過 WebFetch 交叉比對兩來源後取得；若省略參數則自動
   改用 Yahoo Finance 單一來源抓取，供排程自動化使用）進 data.json，
   並依「估值分區框架」計算目前價格所屬區間：便宜價／甜甜價／正常／超貴價。
+  同時用近6個月 ADR/匯率/台股歷史資料訓練「ADR隔夜漲跌% → 台股開盤缺口%」OLS迴歸，
+  套用在今天的ADR變動上，機率性推估台股開盤價（含68%/95%信賴區間、上漲機率）。
 
   用法（手動交叉比對）：
     .\merge-and-classify.ps1 -AdrPrice 424.61 -AdrChangePct 5.55 -AdrQuoteTime "2026-07-21T16:00:00-04:00" `
@@ -20,40 +22,149 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$RegressionWindowMonths = 6
+$MinRegressionSamples = 20
 
-function Get-YahooQuote([string]$Symbol) {
-    $url = "https://query1.finance.yahoo.com/v8/finance/chart/$Symbol`?interval=1d&range=5d"
+# 抓取 Yahoo Finance 每日收盤序列。除了回傳最新報價(price/changePct/quoteTime)，也回傳
+# 完整每日收盤序列(Series)，供「ADR vs 開盤缺口」迴歸訓練使用，避免重複發送請求。
+function Get-YahooDaily([string]$Symbol, [string]$Range = "6mo") {
+    $url = "https://query1.finance.yahoo.com/v8/finance/chart/$Symbol`?interval=1d&range=$Range"
     $resp = Invoke-RestMethod -Uri $url -Headers @{ "User-Agent" = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)" }
-    $meta = $resp.chart.result[0].meta
+    $result = $resp.chart.result[0]
+    $meta = $result.meta
     if ($null -eq $meta) { throw "Yahoo Finance 無資料: $Symbol" }
-    $price = $meta.regularMarketPrice
 
+    $timestamps = @($result.timestamp)
+    $rawCloses = @($result.indicators.quote[0].close)
+    $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById("America/New_York")
+    $series = New-Object System.Collections.Generic.List[PSCustomObject]
+    for ($i = 0; $i -lt $timestamps.Count; $i++) {
+        if ($null -eq $rawCloses[$i]) { continue }
+        $utc = [datetimeoffset]::FromUnixTimeSeconds($timestamps[$i]).UtcDateTime
+        $local = [System.TimeZoneInfo]::ConvertTimeFromUtc($utc, $tz)
+        $series.Add([PSCustomObject]@{ date = $local.ToString("yyyy-MM-dd"); close = $rawCloses[$i] })
+    }
+
+    $price = $meta.regularMarketPrice
     # meta.previousClose 常缺失，meta.chartPreviousClose 是查詢範圍(range)起點之前的收盤價，
     # 不一定是「前一個交易日」，用它算漲跌%可能落差好幾天而算錯。改為直接從每日收盤價序列
     # 取倒數第二個有效值（= 真正的前一交易日收盤），確保漲跌%永遠是逐日比較。
-    $validCloses = @($resp.chart.result[0].indicators.quote[0].close | Where-Object { $null -ne $_ })
-    if ($validCloses.Count -ge 2) {
-        $prevClose = $validCloses[$validCloses.Count - 2]
+    $closes = @($series | ForEach-Object { $_.close })
+    if ($closes.Count -ge 2) {
+        $prevClose = $closes[$closes.Count - 2]
     } else {
         $prevClose = if ($meta.previousClose) { $meta.previousClose } else { $meta.chartPreviousClose }
     }
     $changePct = if ($prevClose) { [math]::Round(($price / $prevClose - 1) * 100, 2) } else { $null }
     $quoteTime = ([datetimeoffset]::FromUnixTimeSeconds($meta.regularMarketTime)).UtcDateTime.ToString("o")
-    return [PSCustomObject]@{ price = $price; changePct = $changePct; quoteTime = $quoteTime }
+    return [PSCustomObject]@{ price = $price; changePct = $changePct; quoteTime = $quoteTime; series = $series }
+}
+
+# ---- 統計小工具 ----
+function Get-Mean([double[]]$a) { ($a | Measure-Object -Average).Average }
+function Get-StdDev([double[]]$a) {
+    $m = Get-Mean $a
+    [math]::Sqrt((Get-Mean ($a | ForEach-Object { ($_ - $m) * ($_ - $m) })))
+}
+function Get-OlsRegression([double[]]$xs, [double[]]$ys) {
+    $n = $xs.Count
+    $mx = Get-Mean $xs; $my = Get-Mean $ys
+    $sxy = 0.0; $sxx = 0.0; $syy = 0.0
+    for ($i = 0; $i -lt $n; $i++) {
+        $dx = $xs[$i] - $mx; $dy = $ys[$i] - $my
+        $sxy += $dx * $dy; $sxx += $dx * $dx; $syy += $dy * $dy
+    }
+    $beta = $sxy / $sxx
+    $alpha = $my - $beta * $mx
+    $r = $sxy / [math]::Sqrt($sxx * $syy)
+    return [PSCustomObject]@{ beta = $beta; alpha = $alpha; r = $r; r2 = $r * $r; n = $n }
+}
+# 標準常態分布 CDF（Abramowitz & Stegun 7.1.26 近似），把「預估缺口% / 殘差標準差」換算成機率。
+function Get-Erf([double]$x) {
+    $sign = if ($x -lt 0) { -1 } else { 1 }
+    $x = [math]::Abs($x)
+    $a1=0.254829592; $a2=-0.284496736; $a3=1.421413741; $a4=-1.453152027; $a5=1.061405429; $p=0.3275911
+    $t = 1 / (1 + $p * $x)
+    $y = 1 - (((((($a5*$t+$a4)*$t)+$a3)*$t+$a2)*$t+$a1)*$t*[math]::Exp(-$x*$x))
+    return $sign * $y
+}
+function Get-NormalCdf([double]$z) { return 0.5 * (1 + (Get-Erf ($z / [math]::Sqrt(2)))) }
+
+function Find-NearestOnOrBefore($map, [string[]]$sortedDates, [string]$date) {
+    $lo = 0; $hi = $sortedDates.Count - 1; $ans = $null
+    while ($lo -le $hi) {
+        $mid = [math]::Floor(($lo + $hi) / 2)
+        if ($sortedDates[$mid] -le $date) { $ans = $sortedDates[$mid]; $lo = $mid + 1 } else { $hi = $mid - 1 }
+    }
+    if ($null -eq $ans) { return $null }
+    return $map[$ans]
+}
+
+# 用近6個月 ADR(TSM)/USD-TWD/台股日K，訓練「ADR單日漲跌% → 台股隔日開盤缺口%」OLS迴歸。
+function Get-OpenGapModel($adrSeries, $fxSeries, $twDaily) {
+    $adrMap = @{}; foreach ($s in $adrSeries) { $adrMap[$s.date] = $s.close }
+    $adrDates = @($adrSeries | ForEach-Object { $_.date })
+    $fxMap = @{}; foreach ($s in $fxSeries) { $fxMap[$s.date] = $s.close }
+    $fxDates = @($fxSeries | ForEach-Object { $_.date } | Sort-Object)
+
+    $pairsByTwDate = @{}
+    for ($i = 1; $i -lt $adrDates.Count; $i++) {
+        $D = $adrDates[$i]; $Dprev = $adrDates[$i - 1]
+        $adrClose = $adrMap[$D]; $adrClosePrev = $adrMap[$Dprev]
+        $adrChangePct = ($adrClose / $adrClosePrev - 1) * 100
+
+        $fx = Find-NearestOnOrBefore $fxMap $fxDates $D
+        if ($null -eq $fx) { continue }
+
+        $tIdx = -1
+        for ($j = 0; $j -lt $twDaily.Count; $j++) {
+            if ($twDaily[$j].date -gt $D) { $tIdx = $j; break }
+        }
+        if ($tIdx -le 0) { continue }
+        $T = $twDaily[$tIdx]; $Tprev = $twDaily[$tIdx - 1]
+        $twOpenGapPct = ($T.open / $Tprev.close - 1) * 100
+
+        # 同一台股交易日可能對應多個ADR日期，只留每個台股交易日最後一筆
+        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; twOpenGapPct = $twOpenGapPct }
+    }
+
+    $uniq = @($pairsByTwDate.Values)
+    if ($uniq.Count -lt $MinRegressionSamples) { return $null }
+
+    $xs = @($uniq | ForEach-Object { $_.adrChangePct })
+    $ys = @($uniq | ForEach-Object { $_.twOpenGapPct })
+    $reg = Get-OlsRegression $xs $ys
+    $residuals = @($uniq | ForEach-Object { $_.twOpenGapPct - ($reg.beta * $_.adrChangePct + $reg.alpha) })
+    $residualStd = Get-StdDev $residuals
+    $hitCount = @($uniq | Where-Object { [math]::Sign($_.adrChangePct) -eq [math]::Sign($_.twOpenGapPct) -and $_.adrChangePct -ne 0 }).Count
+    $hitRate = $hitCount / $uniq.Count
+
+    return [PSCustomObject]@{ beta = $reg.beta; alpha = $reg.alpha; r = $reg.r; r2 = $reg.r2; n = $reg.n; residualStd = $residualStd; hitRate = $hitRate }
 }
 
 $sources = @("stockanalysis.com", "finance.yahoo.com")
 $fxSource = "tw.stock.yahoo.com USDTWD=X"
 
+# 近6個月 ADR/匯率歷史序列：無論今天的ADR/匯率是手動交叉比對還是自動抓取，都需要這份
+# 歷史資料來訓練「ADR vs 台股開盤缺口」迴歸模型，所以固定抓取。
+$adrDaily = $null; $fxDaily = $null
+try {
+    $adrDaily = Get-YahooDaily "TSM"
+    $fxDaily = Get-YahooDaily "TWD=X"
+} catch {
+    Write-Warning "抓取 ADR/匯率近6個月歷史序列失敗，將略過開盤價機率預估: $($_.Exception.Message)"
+}
+
 if (-not $AdrPrice -or -not $AdrQuoteTime -or -not $UsdTwd -or -not $FxQuoteTime) {
+    if ($null -eq $adrDaily -or $null -eq $fxDaily) {
+        throw "缺少必要參數且自動抓取失敗：-AdrPrice -AdrChangePct -AdrQuoteTime -UsdTwd -FxQuoteTime"
+    }
     Write-Host "未提供 -AdrPrice/-UsdTwd 等參數，改用 Yahoo Finance 自動抓取 ADR(TSM) 與 USD/TWD..."
-    $adrAuto = Get-YahooQuote "TSM"
-    $fxAuto = Get-YahooQuote "TWD=X"
-    $AdrPrice = $adrAuto.price
-    $AdrChangePct = $adrAuto.changePct
-    $AdrQuoteTime = $adrAuto.quoteTime
-    $UsdTwd = $fxAuto.price
-    $FxQuoteTime = $fxAuto.quoteTime
+    $AdrPrice = $adrDaily.price
+    $AdrChangePct = $adrDaily.changePct
+    $AdrQuoteTime = $adrDaily.quoteTime
+    $UsdTwd = $fxDaily.price
+    $FxQuoteTime = $fxDaily.quoteTime
     $sources = @("query1.finance.yahoo.com (TSM)")
     $fxSource = "query1.finance.yahoo.com (TWD=X)"
 }
@@ -189,6 +300,41 @@ if (Test-Path $configPath) {
         updatedAt            = $cfg.updatedAt
     }
     $d | Add-Member -NotePropertyName officialForecast -NotePropertyValue $officialForecast -Force
+}
+
+# ---- 台股開盤價機率預估（依近6個月「ADR漲跌% → 開盤缺口%」迴歸模型） ----
+$openPrediction = $null
+if ($adrDaily -and $fxDaily) {
+    try {
+        $model = Get-OpenGapModel $adrDaily.series $fxDaily.series $d.daily
+        if ($model) {
+            $predictedGapPct = $model.beta * $AdrChangePct + $model.alpha
+            $base = $d.valuation.closePrice
+            $priceAt = { param($gapPct) [math]::Round($base * (1 + $gapPct / 100), 2) }
+            $probUpPct = [math]::Round((Get-NormalCdf ($predictedGapPct / $model.residualStd)) * 100, 1)
+
+            $openPrediction = [PSCustomObject]@{
+                predictedGapPct = [math]::Round($predictedGapPct, 2)
+                predictedOpen   = (& $priceAt $predictedGapPct)
+                ci68            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $model.residualStd)); high = (& $priceAt ($predictedGapPct + $model.residualStd)) }
+                ci95            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - 1.96 * $model.residualStd)); high = (& $priceAt ($predictedGapPct + 1.96 * $model.residualStd)) }
+                probUpPct       = $probUpPct
+                basisAdrChangePct = $AdrChangePct
+                basisPrevClose  = $base
+                model           = [PSCustomObject]@{
+                    beta = [math]::Round($model.beta, 4); alpha = [math]::Round($model.alpha, 4); r2 = [math]::Round($model.r2, 4)
+                    residualStd = [math]::Round($model.residualStd, 4); hitRatePct = [math]::Round($model.hitRate * 100, 1)
+                    sampleSize = $model.n; windowMonths = $RegressionWindowMonths
+                }
+            }
+            $d | Add-Member -NotePropertyName openPrediction -NotePropertyValue $openPrediction -Force
+            Write-Host "開盤價機率預估: 缺口$($openPrediction.predictedGapPct)%  預估開盤價$($openPrediction.predictedOpen)  上漲機率$($probUpPct)%（R²=$([math]::Round($model.r2,2)), n=$($model.n)）"
+        } else {
+            Write-Warning "可用配對樣本數不足(<$MinRegressionSamples)，略過開盤價機率預估"
+        }
+    } catch {
+        Write-Warning "開盤價機率預估計算失敗，略過: $($_.Exception.Message)"
+    }
 }
 
 $d | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $path -Encoding utf8

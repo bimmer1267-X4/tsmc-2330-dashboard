@@ -1,5 +1,5 @@
 // 抓取台積電(2330)近6個月日K + 本益比/殖利率/股價淨值比 + 最新季度EPS，
-// 並計算 MA5/20/60、RSI(14)、MACD(12,26,9)、布林通道(20,2) 等技術指標，
+// 並計算 MA5/20/60、RSI(14)、MACD(12,26,9)、布林通道(20,2)、KD(9,3,3) 等技術指標，
 // 輸出 data/data.json，供 dashboard.template.html 樣板注入使用。
 // 跨平台版本 (Node.js >= 18，需內建 fetch)，邏輯與 update-dashboard.ps1 對等。
 //
@@ -146,10 +146,35 @@ function emaSeries(arr, period) {
   return out;
 }
 
+// KD隨機指標(9,3,3)：RSV = (收盤 - 近9日最低價) / (近9日最高價 - 近9日最低價) * 100，
+// K/D 用 2/3 前值 + 1/3 新值 平滑，起始基準值採慣例的 50。
+function computeKD(daily, period = 9) {
+  const n = daily.length;
+  const k = new Array(n).fill(null);
+  const d = new Array(n).fill(null);
+  let prevK = 50, prevD = 50;
+  for (let i = period - 1; i < n; i++) {
+    let hh = -Infinity, ll = Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      hh = Math.max(hh, daily[j].high);
+      ll = Math.min(ll, daily[j].low);
+    }
+    const rsv = hh === ll ? 50 : ((daily[i].close - ll) / (hh - ll)) * 100;
+    const kVal = (prevK * 2 + rsv) / 3;
+    const dVal = (prevD * 2 + kVal) / 3;
+    k[i] = kVal;
+    d[i] = dVal;
+    prevK = kVal;
+    prevD = dVal;
+  }
+  return { k, d };
+}
+
 function computeIndicators(daily) {
   console.log("[4/4] 計算技術指標...");
   const closes = daily.map((d) => d.close);
   const n = closes.length;
+  const kd = computeKD(daily);
 
   const ema12 = emaSeries(closes, 12);
   const ema26 = emaSeries(closes, 26);
@@ -211,6 +236,8 @@ function computeIndicators(daily) {
       macd,
       signal,
       histogram: macd !== null && signal !== null ? macd - signal : null,
+      k: kd.k[i],
+      d: kd.d[i],
     };
   });
 

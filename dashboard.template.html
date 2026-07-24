@@ -83,17 +83,24 @@
       <div class="hero" id="hero-price">--</div>
       <div><span class="delta" id="hero-delta"></span></div>
     </div>
-    <div>
-      <span class="zone-badge" id="zone-badge">--</span>
-    </div>
   </div>
   <div class="metrics" id="metrics-grid"></div>
 </div>
 
-<div class="card">
-  <div style="font-weight:600; margin-bottom:8px;">估值分區框架（本益比為主軸，技術面／ADR溢價為輔助修正）</div>
-  <div class="zones-grid" id="zones-grid"></div>
-  <div class="src" id="zone-reasons"></div>
+<div class="card" id="open-prediction-card">
+  <div style="font-weight:600; margin-bottom:2px;">今日台股開盤價機率預估</div>
+  <div class="sub">依近6個月「ADR隔夜漲跌% → 台股開盤缺口%」歷史迴歸模型，套用今天的ADR變動推估</div>
+  <div class="header-row">
+    <div>
+      <div class="hero" id="prediction-price" style="font-size:36px;">--</div>
+      <div><span class="delta" id="prediction-delta"></span></div>
+    </div>
+    <div>
+      <span class="zone-badge" id="prediction-prob-badge">--</span>
+    </div>
+  </div>
+  <div class="metrics" id="prediction-metrics"></div>
+  <div class="src" id="prediction-model-note"></div>
 </div>
 
 <div class="card">
@@ -122,6 +129,9 @@
   <div class="chart-wrap"><svg id="chart-price" width="100%" viewBox="0 0 900 320" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip"></div></div>
   <div style="font-weight:600; margin:14px 0 6px;">成交量</div>
   <div class="chart-wrap"><svg id="chart-volume" width="100%" viewBox="0 0 900 70" preserveAspectRatio="none"></svg></div>
+  <div style="font-weight:600; margin:14px 0 6px;">KD(9,3,3)</div>
+  <div class="legend" id="kd-legend"></div>
+  <div class="chart-wrap"><svg id="chart-kd" width="100%" viewBox="0 0 900 90" preserveAspectRatio="none"></svg></div>
   <div style="font-weight:600; margin:14px 0 6px;">RSI(14)</div>
   <div class="chart-wrap"><svg id="chart-rsi" width="100%" viewBox="0 0 900 90" preserveAspectRatio="none"></svg></div>
   <div style="font-weight:600; margin:14px 0 6px;">MACD(12,26,9)</div>
@@ -140,7 +150,7 @@
 <script>
 (function(){
   const raw = JSON.parse(document.getElementById('dashboard-data').textContent);
-  const daily = raw.daily, ind = raw.indicators, val = raw.valuation, adr = raw.adr, fx = raw.fxRate;
+  const daily = raw.daily, ind = raw.indicators, adr = raw.adr, fx = raw.fxRate;
   const n = daily.length;
   const last = daily[n-1], prevClose = daily[n-2] ? daily[n-2].close : last.close;
   const chg = last.close - prevClose, chgPct = (chg/prevClose*100).toFixed(2);
@@ -153,19 +163,7 @@
   deltaEl.textContent = (chg>=0?'+':'') + fmt(chg,2) + ' (' + (chg>=0?'+':'') + chgPct + '%)';
   deltaEl.className = 'delta ' + (chg>=0?'up':'down');
 
-  const zoneColor = {'便宜價':'good','甜甜價':'sweet','正常':'muted','超貴價':'critical'};
-  const zoneKey = zoneColor[raw.valuationZone] || 'muted';
-  const badge = document.getElementById('zone-badge');
-  badge.textContent = raw.valuationZone;
-  const badgeColorVar = zoneKey === 'muted' ? 'var(--text-secondary)' : 'var(--'+zoneKey+')';
-  badge.style.background = zoneKey === 'muted' ? 'var(--grid)' : (badgeColorVar + '22');
-  badge.style.color = badgeColorVar;
-
   const metrics = [
-    ['本益比 (PE)', fmt(val.peRatio,2)+' 倍'],
-    ['殖利率', fmt(val.dividendYield,2)+'%'],
-    ['股價淨值比', fmt(val.pbRatio,2)+' 倍'],
-    ['最新單季EPS', fmt(raw.epsInfo.eps,2)+' 元 ('+raw.epsInfo.year+'/'+raw.epsInfo.season+')'],
     ['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)'],
     ['ADR換算台股價', fmt(raw.adrImpliedTwd,0)+' 元'],
     ['ADR溢價', (raw.adrPremiumPct>=0?'+':'')+raw.adrPremiumPct+'%'],
@@ -178,6 +176,45 @@
     const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
     d.appendChild(l); d.appendChild(v); mg.appendChild(d);
   });
+
+  // ---- 今日台股開盤價機率預估 ----
+  (function(){
+    const pred = raw.openPrediction;
+    const card = document.getElementById('open-prediction-card');
+    if (!pred) { card.style.display = 'none'; return; }
+
+    document.getElementById('prediction-price').textContent = fmt(pred.predictedOpen,0);
+    const dEl = document.getElementById('prediction-delta');
+    dEl.textContent = (pred.predictedGapPct>=0?'+':'') + fmt(pred.predictedGapPct,2) + '%（缺口）';
+    dEl.className = 'delta ' + (pred.predictedGapPct>=0?'up':'down');
+
+    const probBadge = document.getElementById('prediction-prob-badge');
+    const up = pred.probUpPct;
+    probBadge.textContent = '上漲機率 ' + fmt(up,1) + '%';
+    const probKey = up>=60 ? 'good' : (up<=40 ? 'critical' : 'muted');
+    const probColorVar = probKey==='muted' ? 'var(--text-secondary)' : 'var(--'+probKey+')';
+    probBadge.style.background = probKey==='muted' ? 'var(--grid)' : (probColorVar+'22');
+    probBadge.style.color = probColorVar;
+
+    const m = pred.model;
+    const predMetrics = [
+      ['68%信賴區間', fmt(pred.ci68.low,0)+' ~ '+fmt(pred.ci68.high,0)+' 元'],
+      ['95%信賴區間', fmt(pred.ci95.low,0)+' ~ '+fmt(pred.ci95.high,0)+' 元'],
+      ['依據ADR隔夜漲跌', (pred.basisAdrChangePct>=0?'+':'')+fmt(pred.basisAdrChangePct,2)+'%'],
+      ['模型解釋力 R²', fmt(m.r2,2)],
+      ['歷史方向一致率', fmt(m.hitRatePct,1)+'%'],
+      ['訓練樣本數', m.sampleSize+' 筆（近'+m.windowMonths+'個月）']
+    ];
+    const pmg = document.getElementById('prediction-metrics');
+    predMetrics.forEach(([label,value]) => {
+      const d = document.createElement('div');
+      const l = document.createElement('div'); l.className='metric-label'; l.textContent = label;
+      const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
+      d.appendChild(l); d.appendChild(v); pmg.appendChild(d);
+    });
+    document.getElementById('prediction-model-note').textContent =
+      '模型：開盤缺口% = ' + fmt(m.beta,3) + ' × ADR漲跌% + ' + fmt(m.alpha,3) + '（OLS迴歸，殘差標準差 ' + fmt(m.residualStd,2) + '%，假設常態分布估算機率）。⚠️ 純統計關係，不構成投資建議，不保證準確，實際開盤仍以台股交易所公告為準。';
+  })();
 
   const zoneColorKey = {'便宜價':'good','甜甜價':'sweet','正常':'muted','超貴價':'critical'};
   function renderZoneCards(containerId, thresholds, activeZoneName) {
@@ -199,9 +236,6 @@
       c.appendChild(zh); c.appendChild(zr); container.appendChild(c);
     });
   }
-  renderZoneCards('zones-grid', raw.zoneThresholds, raw.valuationZone);
-  document.getElementById('zone-reasons').textContent = '目前判定依據：' + raw.valuationReasons.join('；');
-
   // ---- 全年預估EPS估值卡（官方預估 / 個人試算 雙軌） ----
   (function(){
     const off = raw.officialForecast;
@@ -433,6 +467,30 @@
     axisLabel(svg, padL-6, padT+6, (maxV/1000).toFixed(0)+'K');
   })();
 
+  // ---- KD(9,3,3) ----
+  (function(){
+    const svg = document.getElementById('chart-kd');
+    const W=900,H=90,padT=8,padB=16;
+    function y(v){ return padT + (H-padT-padB)*(1-v/100); }
+    [20,50,80].forEach(v=>{
+      svg.appendChild(el('line',{x1:padL,x2:W-padR,y1:y(v),y2:y(v),stroke:'var(--grid)','stroke-width':1}));
+      axisLabel(svg, padL-6, y(v)+3, String(v));
+    });
+    function drawLine(key,colorVar){
+      let d='';
+      ind.forEach((r,i)=>{ if(r[key]!=null){ const cmd=d?'L':'M'; d+=cmd+' '+xScale(i,W)+','+y(r[key])+' '; } });
+      if(d) svg.appendChild(el('path',{d,fill:'none',stroke:colorVar,'stroke-width':2,'stroke-linecap':'round'}));
+    }
+    drawLine('k','var(--up)'); drawLine('d','var(--down)');
+    const legend = document.getElementById('kd-legend');
+    [['K','var(--up)'],['D','var(--down)']].forEach(([label,color])=>{
+      const item = document.createElement('div'); item.className='legend-item';
+      const sw = document.createElement('span'); sw.className='legend-swatch'; sw.style.background=color;
+      const t = document.createElement('span'); t.textContent = label;
+      item.appendChild(sw); item.appendChild(t); legend.appendChild(item);
+    });
+  })();
+
   // ---- RSI ----
   (function(){
     const svg = document.getElementById('chart-rsi');
@@ -481,14 +539,14 @@
     const thead = document.createElement('thead');
     thead.innerHTML = '';
     const headRow = document.createElement('tr');
-    ['日期','開盤','最高','最低','收盤','成交量','MA5','MA20','MA60','RSI14'].forEach(h=>{
+    ['日期','開盤','最高','最低','收盤','成交量','MA5','MA20','MA60','KD-K','KD-D','RSI14'].forEach(h=>{
       const th = document.createElement('th'); th.textContent = h; headRow.appendChild(th);
     });
     thead.appendChild(headRow); table.appendChild(thead);
     const tbody = document.createElement('tbody');
     daily.forEach((d,i)=>{
       const r = ind[i]; const tr = document.createElement('tr');
-      [d.date,d.open,d.high,d.low,d.close,d.volume,r.ma5,r.ma20,r.ma60,r.rsi14].forEach(v=>{
+      [d.date,d.open,d.high,d.low,d.close,d.volume,r.ma5,r.ma20,r.ma60,r.k,r.d,r.rsi14].forEach(v=>{
         const td = document.createElement('td'); td.textContent = v==null? '': v; tr.appendChild(td);
       });
       tbody.appendChild(tr);
