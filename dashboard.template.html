@@ -83,6 +83,10 @@
       <div class="hero" id="hero-price">--</div>
       <div><span class="delta" id="hero-delta"></span></div>
     </div>
+    <div style="margin-left:auto; text-align:right;">
+      <div class="metric-label">套牢價（近6個月最高收盤價）</div>
+      <div id="trapped-price" style="color:var(--critical); font-size:22px; font-weight:700; font-variant-numeric:tabular-nums;">--</div>
+    </div>
   </div>
   <div class="metrics" id="metrics-grid"></div>
 </div>
@@ -162,6 +166,9 @@
   const deltaEl = document.getElementById('hero-delta');
   deltaEl.textContent = (chg>=0?'+':'') + fmt(chg,2) + ' (' + (chg>=0?'+':'') + chgPct + '%)';
   deltaEl.className = 'delta ' + (chg>=0?'up':'down');
+
+  const sixMonthHighClose = Math.max(...daily.map((d) => d.close));
+  document.getElementById('trapped-price').textContent = fmt(sixMonthHighClose,0) + ' 元';
 
   const metrics = [
     ['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)'],
