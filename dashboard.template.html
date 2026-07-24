@@ -129,6 +129,9 @@
   <div class="chart-wrap"><svg id="chart-price" width="100%" viewBox="0 0 900 320" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip"></div></div>
   <div style="font-weight:600; margin:14px 0 6px;">成交量</div>
   <div class="chart-wrap"><svg id="chart-volume" width="100%" viewBox="0 0 900 70" preserveAspectRatio="none"></svg></div>
+  <div style="font-weight:600; margin:14px 0 6px;">KD(9,3,3)</div>
+  <div class="legend" id="kd-legend"></div>
+  <div class="chart-wrap"><svg id="chart-kd" width="100%" viewBox="0 0 900 90" preserveAspectRatio="none"></svg></div>
   <div style="font-weight:600; margin:14px 0 6px;">RSI(14)</div>
   <div class="chart-wrap"><svg id="chart-rsi" width="100%" viewBox="0 0 900 90" preserveAspectRatio="none"></svg></div>
   <div style="font-weight:600; margin:14px 0 6px;">MACD(12,26,9)</div>
@@ -464,6 +467,30 @@
     axisLabel(svg, padL-6, padT+6, (maxV/1000).toFixed(0)+'K');
   })();
 
+  // ---- KD(9,3,3) ----
+  (function(){
+    const svg = document.getElementById('chart-kd');
+    const W=900,H=90,padT=8,padB=16;
+    function y(v){ return padT + (H-padT-padB)*(1-v/100); }
+    [20,50,80].forEach(v=>{
+      svg.appendChild(el('line',{x1:padL,x2:W-padR,y1:y(v),y2:y(v),stroke:'var(--grid)','stroke-width':1}));
+      axisLabel(svg, padL-6, y(v)+3, String(v));
+    });
+    function drawLine(key,colorVar){
+      let d='';
+      ind.forEach((r,i)=>{ if(r[key]!=null){ const cmd=d?'L':'M'; d+=cmd+' '+xScale(i,W)+','+y(r[key])+' '; } });
+      if(d) svg.appendChild(el('path',{d,fill:'none',stroke:colorVar,'stroke-width':2,'stroke-linecap':'round'}));
+    }
+    drawLine('k','var(--up)'); drawLine('d','var(--down)');
+    const legend = document.getElementById('kd-legend');
+    [['K','var(--up)'],['D','var(--down)']].forEach(([label,color])=>{
+      const item = document.createElement('div'); item.className='legend-item';
+      const sw = document.createElement('span'); sw.className='legend-swatch'; sw.style.background=color;
+      const t = document.createElement('span'); t.textContent = label;
+      item.appendChild(sw); item.appendChild(t); legend.appendChild(item);
+    });
+  })();
+
   // ---- RSI ----
   (function(){
     const svg = document.getElementById('chart-rsi');
@@ -512,14 +539,14 @@
     const thead = document.createElement('thead');
     thead.innerHTML = '';
     const headRow = document.createElement('tr');
-    ['日期','開盤','最高','最低','收盤','成交量','MA5','MA20','MA60','RSI14'].forEach(h=>{
+    ['日期','開盤','最高','最低','收盤','成交量','MA5','MA20','MA60','KD-K','KD-D','RSI14'].forEach(h=>{
       const th = document.createElement('th'); th.textContent = h; headRow.appendChild(th);
     });
     thead.appendChild(headRow); table.appendChild(thead);
     const tbody = document.createElement('tbody');
     daily.forEach((d,i)=>{
       const r = ind[i]; const tr = document.createElement('tr');
-      [d.date,d.open,d.high,d.low,d.close,d.volume,r.ma5,r.ma20,r.ma60,r.rsi14].forEach(v=>{
+      [d.date,d.open,d.high,d.low,d.close,d.volume,r.ma5,r.ma20,r.ma60,r.k,r.d,r.rsi14].forEach(v=>{
         const td = document.createElement('td'); td.textContent = v==null? '': v; tr.appendChild(td);
       });
       tbody.appendChild(tr);

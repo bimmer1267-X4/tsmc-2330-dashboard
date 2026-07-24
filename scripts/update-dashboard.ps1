@@ -1,6 +1,6 @@
 ﻿<#
   抓取台積電(2330)近6個月日K + 本益比/殖利率/股價淨值比 + 最新季度EPS，
-  並計算 MA5/20/60、RSI(14)、MACD(12,26,9)、布林通道(20,2) 等技術指標，
+  並計算 MA5/20/60、RSI(14)、MACD(12,26,9)、布林通道(20,2)、KD(9,3,3) 等技術指標，
   輸出 data\data.json，供 dashboard.html 樣板注入使用。
 
   ADR / 匯率資料不在本腳本抓取範圍內（需要瀏覽器級渲染或即時查證），
@@ -175,6 +175,26 @@ if ($n -gt 14) {
     }
 }
 
+# KD隨機指標(9,3,3)：RSV = (收盤 - 近9日最低價) / (近9日最高價 - 近9日最低價) * 100，
+# K/D 用 2/3 前值 + 1/3 新值 平滑，起始基準值採慣例的 50。
+$kdPeriod = 9
+$kArr = New-Object 'double[]' $n
+$dArr = New-Object 'double[]' $n
+for ($i = 0; $i -lt $n; $i++) { $kArr[$i] = [double]::NaN; $dArr[$i] = [double]::NaN }
+$prevK = 50.0; $prevD = 50.0
+for ($i = $kdPeriod - 1; $i -lt $n; $i++) {
+    $hh = [double]::NegativeInfinity; $ll = [double]::PositiveInfinity
+    for ($j = $i - $kdPeriod + 1; $j -le $i; $j++) {
+        $hh = [math]::Max($hh, $daily[$j].high)
+        $ll = [math]::Min($ll, $daily[$j].low)
+    }
+    $rsv = if ($hh -eq $ll) { 50.0 } else { (($daily[$i].close - $ll) / ($hh - $ll)) * 100 }
+    $kVal = ($prevK * 2 + $rsv) / 3
+    $dVal = ($prevD * 2 + $kVal) / 3
+    $kArr[$i] = $kVal; $dArr[$i] = $dVal
+    $prevK = $kVal; $prevD = $dVal
+}
+
 $indicators = @()
 for ($i = 0; $i -lt $n; $i++) {
     $ma5 = Get-SMA $closes $i 5
@@ -196,6 +216,8 @@ for ($i = 0; $i -lt $n; $i++) {
         macd     = $(if ([double]::IsNaN($macdLine[$i])) { $null } else { $macdLine[$i] })
         signal   = $(if ([double]::IsNaN($signalLine[$i])) { $null } else { $signalLine[$i] })
         histogram= $(if ([double]::IsNaN($macdLine[$i]) -or [double]::IsNaN($signalLine[$i])) { $null } else { $macdLine[$i] - $signalLine[$i] })
+        k        = $(if ([double]::IsNaN($kArr[$i])) { $null } else { $kArr[$i] })
+        d        = $(if ([double]::IsNaN($dArr[$i])) { $null } else { $dArr[$i] })
     }
 }
 
