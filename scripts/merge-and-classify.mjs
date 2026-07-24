@@ -42,7 +42,14 @@ async function fetchYahooQuote(symbol) {
   if (!result?.meta) throw new Error(`Yahoo Finance 無資料: ${symbol}`);
   const { meta } = result;
   const price = meta.regularMarketPrice;
-  const previousClose = meta.previousClose ?? meta.chartPreviousClose;
+
+  // meta.previousClose 常缺失，meta.chartPreviousClose 則是查詢範圍(range)起點之前的收盤價，
+  // 不一定是「前一個交易日」，用它算漲跌%可能落差好幾天而算錯。改為直接從每日收盤價序列
+  // 取倒數第二個有效值（= 真正的前一交易日收盤），確保漲跌%永遠是逐日比較。
+  const closes = result.indicators?.quote?.[0]?.close ?? [];
+  const validCloses = closes.filter((c) => c != null);
+  const previousClose = validCloses.length >= 2 ? validCloses[validCloses.length - 2] : (meta.previousClose ?? meta.chartPreviousClose);
+
   const changePct = previousClose ? Math.round((price / previousClose - 1) * 10000) / 100 : null;
   const quoteTime = new Date(meta.regularMarketTime * 1000).toISOString();
   return { price, changePct, quoteTime };

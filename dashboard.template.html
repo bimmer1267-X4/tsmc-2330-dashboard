@@ -147,7 +147,7 @@
 
   function fmt(v, d) { return v == null ? '—' : Number(v).toLocaleString('zh-TW', {minimumFractionDigits:d||0, maximumFractionDigits:d||0}); }
 
-  document.getElementById('updated-at').textContent = new Date(raw.generatedAt).toLocaleString('zh-TW', {hour12:false});
+  document.getElementById('updated-at').textContent = new Date(raw.generatedAt).toLocaleString('zh-TW', {hour12:false, timeZone:'Asia/Taipei'});
   document.getElementById('hero-price').textContent = fmt(last.close,0);
   const deltaEl = document.getElementById('hero-delta');
   deltaEl.textContent = (chg>=0?'+':'') + fmt(chg,2) + ' (' + (chg>=0?'+':'') + chgPct + '%)';
@@ -284,7 +284,7 @@
         impliedFullYearGrowthPct: off.impliedFullYearGrowthPct, h1ActualGrowthPct: off.h1ActualGrowthPct,
         impliedH2GrowthPct: off.impliedH2GrowthPct, forwardPE: off.forwardPE, peg: off.peg, zone: off.zone,
         reasons: off.reasons, thresholds: off.thresholds, warning: off.growthGapWarning };
-      render(result, '來源：' + off.forecastSource + '｜更新時間：' + new Date(off.updatedAt).toLocaleString('zh-TW',{hour12:false}));
+      render(result, '來源：' + off.forecastSource + '｜更新時間：' + new Date(off.updatedAt).toLocaleString('zh-TW',{hour12:false, timeZone:'Asia/Taipei'}));
     }
     function showPersonal() {
       btnPersonal.classList.add('active'); btnOfficial.classList.remove('active');
