@@ -1,0 +1,499 @@
+<title>台積電(2330) 買賣評估儀表板</title>
+<style>
+  :root {
+    --surface-1: #fcfcfb; --page: #f9f9f7; --text-primary: #0b0b0b; --text-secondary: #52514e;
+    --muted: #898781; --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --up: #2a78d6; --down: #e34948; --ma5: #eb6834; --ma20: #1baf7a; --ma60: #4a3aa7;
+    --bb-fill: rgba(137,135,129,0.12); --macd-hist-pos: rgba(42,120,214,0.55); --macd-hist-neg: rgba(227,73,72,0.55);
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --sweet: #1baf7a;
+    --card-shadow: 0 1px 2px rgba(11,11,11,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff; --text-secondary: #c3c2b7;
+      --muted: #898781; --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+      --up: #3987e5; --down: #e66767; --ma5: #d95926; --ma20: #199e70; --ma60: #9085e9;
+      --bb-fill: rgba(137,135,129,0.16); --macd-hist-pos: rgba(57,135,229,0.55); --macd-hist-neg: rgba(230,103,103,0.55);
+      --good: #0ca30c; --warning: #c98500; --serious: #ec835a; --critical: #e66767; --sweet: #199e70;
+    }
+  }
+  :root[data-theme="dark"] {
+    --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff; --text-secondary: #c3c2b7;
+    --muted: #898781; --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+    --up: #3987e5; --down: #e66767; --ma5: #d95926; --ma20: #199e70; --ma60: #9085e9;
+    --bb-fill: rgba(137,135,129,0.16); --macd-hist-pos: rgba(57,135,229,0.55); --macd-hist-neg: rgba(230,103,103,0.55);
+    --good: #0ca30c; --warning: #c98500; --serious: #ec835a; --critical: #e66767; --sweet: #199e70;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 20px; max-width: 1100px; margin-inline: auto;
+  }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; box-shadow: var(--card-shadow); margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  .sub { color: var(--text-secondary); font-size: 13px; margin-bottom: 14px; }
+  .header-row { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-end; }
+  .hero { font-size: 48px; font-weight: 600; line-height: 1; }
+  .delta { font-size: 15px; font-weight: 600; margin-left: 8px; }
+  .delta.up { color: var(--good); } .delta.down { color: var(--critical); }
+  .zone-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px; font-weight: 600; font-size: 14px; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin-top: 16px; }
+  .metric-label { font-size: 12px; color: var(--muted); }
+  .metric-value { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .zones-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
+  .zone-card { border-radius: 8px; padding: 10px 12px; border: 1px solid var(--border); }
+  .zone-card .zh { font-weight: 700; font-size: 13px; }
+  .zone-card .zr { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+  .zone-card.active { outline: 2px solid currentColor; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-swatch { width: 14px; height: 2px; border-radius: 1px; }
+  .legend-swatch.fill { height: 10px; border-radius: 2px; opacity: .5; }
+  .chart-wrap { position: relative; }
+  svg text { fill: var(--muted); font-size: 10px; }
+  .tooltip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: var(--card-shadow); display: none; white-space: nowrap; z-index: 5; }
+  .tooltip .t-date { color: var(--text-secondary); margin-bottom: 4px; }
+  .tooltip .t-row { display: flex; justify-content: space-between; gap: 14px; }
+  .tooltip .t-row .k { display: flex; align-items: center; gap: 5px; color: var(--text-secondary); }
+  .tooltip .t-row .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tkey { width: 10px; height: 2px; display: inline-block; }
+  footer { font-size: 12px; color: var(--muted); line-height: 1.6; padding: 10px 4px 30px; }
+  .src { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  table.sr-table { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+  .toggle-row { display: flex; gap: 8px; margin-bottom: 14px; }
+  .toggle-btn { border: 1px solid var(--border); background: var(--page); color: var(--text-secondary);
+    padding: 7px 16px; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .toggle-btn.active { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }
+  .forecast-input-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .forecast-input-row input[type=number] { font-size: 16px; font-weight: 600; padding: 6px 10px; width: 110px;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--page); color: var(--text-primary); }
+  .link-btn { background: none; border: none; color: var(--text-secondary); text-decoration: underline; cursor: pointer; font-size: 12px; padding: 0; }
+  .warning-banner { background: var(--warning); color: #1a1200; opacity: 0.95; border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-top: 10px; display: none; }
+  .warning-banner.show { display: block; }
+  .forecast-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+</style>
+
+<div class="card">
+  <h1>台積電 2330 買賣評估儀表板</h1>
+  <div class="sub">資料更新時間：<span id="updated-at">--</span>（台灣時間）｜資料來源：TWSE 台灣證券交易所（股價/本益比/EPS）、stockanalysis.com＋Yahoo Finance 交叉比對（ADR）、Yahoo股市（匯率）</div>
+  <div class="header-row">
+    <div>
+      <div class="hero" id="hero-price">--</div>
+      <div><span class="delta" id="hero-delta"></span></div>
+    </div>
+    <div>
+      <span class="zone-badge" id="zone-badge">--</span>
+    </div>
+  </div>
+  <div class="metrics" id="metrics-grid"></div>
+</div>
+
+<div class="card">
+  <div style="font-weight:600; margin-bottom:8px;">估值分區框架（本益比為主軸，技術面／ADR溢價為輔助修正）</div>
+  <div class="zones-grid" id="zones-grid"></div>
+  <div class="src" id="zone-reasons"></div>
+</div>
+
+<div class="card">
+  <div style="font-weight:600; margin-bottom:2px;">全年預估EPS估值（Forward PE／PEG）</div>
+  <div class="sub">Trailing PE偏落後（含去年較弱季度），對高成長股改用前瞻本益比與PEG更能反映真實貴賤程度</div>
+  <div class="toggle-row">
+    <button class="toggle-btn" id="btn-official">官方預估</button>
+    <button class="toggle-btn" id="btn-personal">個人試算</button>
+  </div>
+  <div id="personal-input-area" class="forecast-input-row" style="display:none;">
+    <label for="eps-input" style="font-size:13px; color:var(--text-secondary);">全年預估EPS(元)</label>
+    <input type="number" id="eps-input" step="0.1" />
+    <button class="link-btn" id="btn-reset-official">套用官方預估值</button>
+    <span class="src" id="personal-persist-note">此數字僅存在您瀏覽器本機(localStorage)，不影響官方每日自動更新的頁面資料</span>
+  </div>
+  <div class="metrics" id="forecast-metrics"></div>
+  <div class="zones-grid" id="forecast-zones-grid" style="margin-top:12px;"></div>
+  <div class="src" id="forecast-reasons"></div>
+  <div class="warning-banner" id="forecast-warning"></div>
+  <div class="forecast-note" id="forecast-source-note"></div>
+</div>
+
+<div class="card">
+  <div style="font-weight:600; margin-bottom:6px;">近6個月K線圖（MA5/20/60、布林通道）</div>
+  <div class="legend" id="price-legend"></div>
+  <div class="chart-wrap"><svg id="chart-price" width="100%" viewBox="0 0 900 320" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip"></div></div>
+  <div style="font-weight:600; margin:14px 0 6px;">成交量</div>
+  <div class="chart-wrap"><svg id="chart-volume" width="100%" viewBox="0 0 900 70" preserveAspectRatio="none"></svg></div>
+  <div style="font-weight:600; margin:14px 0 6px;">RSI(14)</div>
+  <div class="chart-wrap"><svg id="chart-rsi" width="100%" viewBox="0 0 900 90" preserveAspectRatio="none"></svg></div>
+  <div style="font-weight:600; margin:14px 0 6px;">MACD(12,26,9)</div>
+  <div class="legend" id="macd-legend"></div>
+  <div class="chart-wrap"><svg id="chart-macd" width="100%" viewBox="0 0 900 110" preserveAspectRatio="none"></svg></div>
+</div>
+
+<table class="sr-table" id="data-table"><caption>台積電2330近6個月每日交易數據</caption></table>
+
+<footer>
+  ⚠️ 本頁面僅供分析參考，不構成投資建議。ADR與匯率資料非交易所官方即時feed，而是雙來源交叉比對後採用，可能與實際成交價有落差；估值分區門檻為分析框架下的參考值，非保證買賣訊號。實際交易前請以官方即時報價為準，並自行承擔投資風險。<br/>
+  資料來源：TWSE `STOCK_DAY`／`BWIBBU_d`／OpenAPI `t187ap14_L`、stockanalysis.com、finance.yahoo.com、tw.stock.yahoo.com。
+</footer>
+
+<script id="dashboard-data" type="application/json">__DASHBOARD_DATA__</script>
+<script>
+(function(){
+  const raw = JSON.parse(document.getElementById('dashboard-data').textContent);
+  const daily = raw.daily, ind = raw.indicators, val = raw.valuation, adr = raw.adr, fx = raw.fxRate;
+  const n = daily.length;
+  const last = daily[n-1], prevClose = daily[n-2] ? daily[n-2].close : last.close;
+  const chg = last.close - prevClose, chgPct = (chg/prevClose*100).toFixed(2);
+
+  function fmt(v, d) { return v == null ? '—' : Number(v).toLocaleString('zh-TW', {minimumFractionDigits:d||0, maximumFractionDigits:d||0}); }
+
+  document.getElementById('updated-at').textContent = new Date(raw.generatedAt).toLocaleString('zh-TW', {hour12:false});
+  document.getElementById('hero-price').textContent = fmt(last.close,0);
+  const deltaEl = document.getElementById('hero-delta');
+  deltaEl.textContent = (chg>=0?'+':'') + fmt(chg,2) + ' (' + (chg>=0?'+':'') + chgPct + '%)';
+  deltaEl.className = 'delta ' + (chg>=0?'up':'down');
+
+  const zoneColor = {'便宜價':'good','甜甜價':'sweet','正常':'muted','超貴價':'critical'};
+  const zoneKey = zoneColor[raw.valuationZone] || 'muted';
+  const badge = document.getElementById('zone-badge');
+  badge.textContent = raw.valuationZone;
+  const badgeColorVar = zoneKey === 'muted' ? 'var(--text-secondary)' : 'var(--'+zoneKey+')';
+  badge.style.background = zoneKey === 'muted' ? 'var(--grid)' : (badgeColorVar + '22');
+  badge.style.color = badgeColorVar;
+
+  const metrics = [
+    ['本益比 (PE)', fmt(val.peRatio,2)+' 倍'],
+    ['殖利率', fmt(val.dividendYield,2)+'%'],
+    ['股價淨值比', fmt(val.pbRatio,2)+' 倍'],
+    ['最新單季EPS', fmt(raw.epsInfo.eps,2)+' 元 ('+raw.epsInfo.year+'/'+raw.epsInfo.season+')'],
+    ['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)'],
+    ['ADR換算台股價', fmt(raw.adrImpliedTwd,0)+' 元'],
+    ['ADR溢價', (raw.adrPremiumPct>=0?'+':'')+raw.adrPremiumPct+'%'],
+    ['USD/TWD', fmt(fx.usdTwd,3)]
+  ];
+  const mg = document.getElementById('metrics-grid');
+  metrics.forEach(([label, value]) => {
+    const d = document.createElement('div');
+    const l = document.createElement('div'); l.className='metric-label'; l.textContent = label;
+    const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
+    d.appendChild(l); d.appendChild(v); mg.appendChild(d);
+  });
+
+  const zoneColorKey = {'便宜價':'good','甜甜價':'sweet','正常':'muted','超貴價':'critical'};
+  function renderZoneCards(containerId, thresholds, activeZoneName) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = '';
+    const zoneDefs = [
+      ['便宜價', 'good', '< '+fmt(thresholds.cheapMax,0)+' 元 (PE<20倍)'],
+      ['甜甜價', 'sweet', fmt(thresholds.cheapMax,0)+' ~ '+fmt(thresholds.sweetMax,0)+' 元 (PE 20~24倍)'],
+      ['正常', 'muted', fmt(thresholds.sweetMax,0)+' ~ '+fmt(thresholds.normalMax,0)+' 元 (PE 24~28倍)'],
+      ['超貴價', 'critical', '≥ '+fmt(thresholds.normalMax,0)+' 元 (PE>28倍)']
+    ];
+    zoneDefs.forEach(([name, key, range]) => {
+      const c = document.createElement('div');
+      c.className = 'zone-card' + (name === activeZoneName ? ' active' : '');
+      const colorVar = key === 'muted' ? 'var(--text-secondary)' : 'var(--'+key+')';
+      c.style.borderColor = colorVar; c.style.color = colorVar;
+      const zh = document.createElement('div'); zh.className='zh'; zh.textContent = name;
+      const zr = document.createElement('div'); zr.className='zr'; zr.style.color='var(--text-secondary)'; zr.textContent = range;
+      c.appendChild(zh); c.appendChild(zr); container.appendChild(c);
+    });
+  }
+  renderZoneCards('zones-grid', raw.zoneThresholds, raw.valuationZone);
+  document.getElementById('zone-reasons').textContent = '目前判定依據：' + raw.valuationReasons.join('；');
+
+  // ---- 全年預估EPS估值卡（官方預估 / 個人試算 雙軌） ----
+  (function(){
+    const off = raw.officialForecast;
+    if (!off) { document.querySelector('#forecast-metrics').closest('.card').style.display = 'none'; return; }
+    const tf = raw.technicalFlags;
+    const LS_KEY = 'tsmc2330-personal-eps-forecast';
+
+    function classifyZone(pe, rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60, peLabel) {
+      const reasons = [];
+      if (pe > 28) reasons.push(peLabel+' '+pe.toFixed(1)+' 倍 > 28倍上緣');
+      if (rsi != null && rsi > 75) reasons.push('RSI '+rsi.toFixed(1)+' 超買(>75)');
+      if (premiumPct > 12) reasons.push('ADR溢價 '+premiumPct+'% > 12%');
+      if (atSixMonthHigh && pe > 24) reasons.push('股價貼近6個月高點且評價不便宜');
+      let zone;
+      if (reasons.length > 0) { zone = '超貴價'; }
+      else if (pe < 20 || (nearBbLower && pe < 22)) {
+        zone = '便宜價';
+        reasons.push(pe<20 ? (peLabel+' '+pe.toFixed(1)+' 倍 < 20倍') : ('價格貼近布林下軌且'+peLabel+'<22'));
+      } else if (pe >= 20 && pe <= 24 && nearMa60 && premiumPct < 8) {
+        zone = '甜甜價';
+        reasons.push(peLabel+' 落在20~24倍，價格靠近MA60支撐，ADR溢價未過熱');
+      } else {
+        zone = '正常';
+        reasons.push(peLabel+' '+pe.toFixed(1)+' 倍落在24~28倍區間，未觸發便宜或超貴條件');
+      }
+      return {zone, reasons};
+    }
+
+    function computeForecast(epsFullYear) {
+      const impliedH2 = +(epsFullYear - off.h1ActualEps).toFixed(2);
+      const impliedFullYearGrowthPct = +((epsFullYear/off.priorYearFullEps - 1)*100).toFixed(1);
+      const impliedH2GrowthPct = +((impliedH2/off.priorYearH2Eps - 1)*100).toFixed(1);
+      const h1ActualGrowthPct = +((off.h1ActualEps/off.priorYearH1Eps - 1)*100).toFixed(1);
+      const forwardPE = +(last.close/epsFullYear).toFixed(2);
+      const peg = impliedFullYearGrowthPct>0 ? +(forwardPE/impliedFullYearGrowthPct).toFixed(2) : null;
+      const cls = classifyZone(forwardPE, tf.rsi14, tf.premiumPct, tf.atSixMonthHigh, tf.nearBbLower, tf.nearMa60, 'Forward PE');
+      const thresholds = {cheapMax: +(20*epsFullYear).toFixed(1), sweetMax:+(24*epsFullYear).toFixed(1), normalMax:+(28*epsFullYear).toFixed(1)};
+      let warning = null;
+      if (Math.abs(impliedH2GrowthPct - h1ActualGrowthPct) > 25) {
+        warning = '此預估隱含下半年年增率 '+impliedH2GrowthPct+'%，與上半年實際年增率 '+h1ActualGrowthPct+'% 落差達 '+Math.abs(impliedH2GrowthPct-h1ActualGrowthPct).toFixed(1)+' 個百分點，請確認此預估是否合理';
+      }
+      return {epsFullYear, h1ActualEps: off.h1ActualEps, impliedH2, impliedFullYearGrowthPct, h1ActualGrowthPct, impliedH2GrowthPct, forwardPE, peg, zone: cls.zone, reasons: cls.reasons, thresholds, warning};
+    }
+
+    function render(result, sourceNote) {
+      const mg = document.getElementById('forecast-metrics'); mg.innerHTML = '';
+      const rows = [
+        ['全年預估EPS', fmt(result.epsFullYear,2)+' 元'],
+        ['Forward PE', fmt(result.forwardPE,1)+' 倍'],
+        ['PEG比率', result.peg==null?'—':fmt(result.peg,2)],
+        ['隱含全年年增率', (result.impliedFullYearGrowthPct>=0?'+':'')+result.impliedFullYearGrowthPct+'%'],
+        ['H1實際EPS(已實現)', fmt(result.h1ActualEps,2)+' 元'],
+        ['H1實際年增率', (result.h1ActualGrowthPct>=0?'+':'')+result.h1ActualGrowthPct+'%'],
+        ['隱含H2需求EPS', fmt(result.impliedH2,2)+' 元'],
+        ['隱含H2年增率', (result.impliedH2GrowthPct>=0?'+':'')+result.impliedH2GrowthPct+'%']
+      ];
+      rows.forEach(([label,value])=>{
+        const d = document.createElement('div');
+        const l = document.createElement('div'); l.className='metric-label'; l.textContent = label;
+        const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
+        d.appendChild(l); d.appendChild(v); mg.appendChild(d);
+      });
+      renderZoneCards('forecast-zones-grid', result.thresholds, result.zone);
+      document.getElementById('forecast-reasons').textContent = '目前判定依據：' + result.reasons.join('；');
+      const warnEl = document.getElementById('forecast-warning');
+      if (result.warning) { warnEl.textContent = '⚠️ ' + result.warning; warnEl.classList.add('show'); }
+      else { warnEl.classList.remove('show'); }
+      document.getElementById('forecast-source-note').textContent = sourceNote;
+    }
+
+    const btnOfficial = document.getElementById('btn-official');
+    const btnPersonal = document.getElementById('btn-personal');
+    const inputArea = document.getElementById('personal-input-area');
+    const epsInput = document.getElementById('eps-input');
+
+    function showOfficial() {
+      btnOfficial.classList.add('active'); btnPersonal.classList.remove('active');
+      inputArea.style.display = 'none';
+      const result = { epsFullYear: off.epsFullYear, h1ActualEps: off.h1ActualEps, impliedH2: off.impliedH2Eps,
+        impliedFullYearGrowthPct: off.impliedFullYearGrowthPct, h1ActualGrowthPct: off.h1ActualGrowthPct,
+        impliedH2GrowthPct: off.impliedH2GrowthPct, forwardPE: off.forwardPE, peg: off.peg, zone: off.zone,
+        reasons: off.reasons, thresholds: off.thresholds, warning: off.growthGapWarning };
+      render(result, '來源：' + off.forecastSource + '｜更新時間：' + new Date(off.updatedAt).toLocaleString('zh-TW',{hour12:false}));
+    }
+    function showPersonal() {
+      btnPersonal.classList.add('active'); btnOfficial.classList.remove('active');
+      inputArea.style.display = 'flex';
+      const saved = parseFloat(localStorage.getItem(LS_KEY));
+      epsInput.value = isFinite(saved) ? saved : off.epsFullYear;
+      renderFromInput();
+    }
+    function renderFromInput() {
+      const v = parseFloat(epsInput.value);
+      if (!isFinite(v) || v <= 0) return;
+      localStorage.setItem(LS_KEY, String(v));
+      render(computeForecast(v), '此為您在本機瀏覽器輸入的個人試算數字，僅供情境參考，不代表官方或法人預估');
+    }
+    epsInput.addEventListener('input', renderFromInput);
+    document.getElementById('btn-reset-official').addEventListener('click', () => { epsInput.value = off.epsFullYear; renderFromInput(); });
+    btnOfficial.addEventListener('click', showOfficial);
+    btnPersonal.addEventListener('click', showPersonal);
+    showOfficial();
+  })();
+
+  // ---- shared x-scale helpers ----
+  const padL = 46, padR = 10;
+  function xScale(i, w) { return padL + (w - padL - padR) * (i / Math.max(n-1,1)); }
+  const svgNS = 'http://www.w3.org/2000/svg';
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function axisLabel(svg, x, y, text, anchor) {
+    const t = el('text', {x, y, 'text-anchor': anchor||'end'});
+    t.textContent = text; svg.appendChild(t);
+  }
+
+  // ---- price chart (candlestick + MA + Bollinger) ----
+  (function(){
+    const svg = document.getElementById('chart-price');
+    const W = 900, H = 320, padT = 10, padB = 20;
+    let lo = Infinity, hi = -Infinity;
+    daily.forEach((d,i) => { lo = Math.min(lo, d.low); hi = Math.max(hi, d.high); });
+    ind.forEach(r => { if (r.bbUpper != null) hi = Math.max(hi, r.bbUpper); if (r.bbLower != null) lo = Math.min(lo, r.bbLower); });
+    const pad = (hi-lo)*0.06; lo -= pad; hi += pad;
+    function y(v) { return padT + (H-padT-padB) * (1 - (v-lo)/(hi-lo)); }
+
+    // gridlines + y labels
+    for (let g=0; g<=4; g++) {
+      const v = lo + (hi-lo)*g/4;
+      const gy = y(v);
+      svg.appendChild(el('line', {x1:padL, x2:W-padR, y1:gy, y2:gy, stroke:'var(--grid)', 'stroke-width':1}));
+      axisLabel(svg, padL-6, gy+3, fmt(v,0));
+    }
+
+    // bollinger band fill
+    let bandPath = '';
+    const upperPts = [], lowerPts = [];
+    ind.forEach((r,i) => { if (r.bbUpper!=null) upperPts.push([xScale(i,W), y(r.bbUpper)]); });
+    ind.forEach((r,i) => { if (r.bbLower!=null) lowerPts.push([xScale(i,W), y(r.bbLower)]); });
+    if (upperPts.length && lowerPts.length) {
+      bandPath = 'M ' + upperPts.map(p=>p.join(',')).join(' L ') + ' L ' + lowerPts.slice().reverse().map(p=>p.join(',')).join(' L ') + ' Z';
+      svg.appendChild(el('path', {d: bandPath, fill: 'var(--bb-fill)', stroke: 'none'}));
+    }
+
+    // candlesticks
+    const candleW = Math.max(1.2, Math.min(6, (W-padL-padR)/n*0.6));
+    daily.forEach((d,i) => {
+      const cx = xScale(i,W);
+      const up = d.close >= d.open;
+      const color = up ? 'var(--up)' : 'var(--down)';
+      svg.appendChild(el('line', {x1:cx,x2:cx,y1:y(d.high),y2:y(d.low), stroke:color, 'stroke-width':1}));
+      const bodyTop = y(Math.max(d.open,d.close)), bodyBot = y(Math.min(d.open,d.close));
+      svg.appendChild(el('rect', {x:cx-candleW/2, y:bodyTop, width:candleW, height:Math.max(1,bodyBot-bodyTop), fill:color}));
+    });
+
+    // MA lines
+    function drawLine(key, colorVar) {
+      let d = '';
+      ind.forEach((r,i) => { if (r[key]!=null) { const cmd = d ? 'L' : 'M'; d += cmd+' '+xScale(i,W)+','+y(r[key])+' '; } });
+      if (d) svg.appendChild(el('path', {d, fill:'none', stroke:colorVar, 'stroke-width':2, 'stroke-linejoin':'round', 'stroke-linecap':'round'}));
+    }
+    drawLine('ma5','var(--ma5)'); drawLine('ma20','var(--ma20)'); drawLine('ma60','var(--ma60)');
+
+    // x-axis date labels (every ~6 weeks)
+    const step = Math.max(1, Math.round(n/6));
+    for (let i=0;i<n;i+=step) {
+      axisLabel(svg, xScale(i,W), H-4, daily[i].date.slice(5), 'middle');
+    }
+
+    // legend
+    const legend = document.getElementById('price-legend');
+    [['MA5','var(--ma5)'],['MA20','var(--ma20)'],['MA60','var(--ma60)'],['布林通道(20,2)','var(--bb-fill)']].forEach(([label,color],idx)=>{
+      const item = document.createElement('div'); item.className='legend-item';
+      const sw = document.createElement('span'); sw.className='legend-swatch'+(idx===3?' fill':''); sw.style.background=color;
+      const t = document.createElement('span'); t.textContent = label;
+      item.appendChild(sw); item.appendChild(t); legend.appendChild(item);
+    });
+
+    // hover crosshair + tooltip
+    const tooltip = document.getElementById('tooltip');
+    const hitRect = el('rect', {x:padL, y:0, width:W-padL-padR, height:H, fill:'transparent'});
+    svg.appendChild(hitRect);
+    const crosshair = el('line', {x1:0,x2:0,y1:padT,y2:H-padB, stroke:'var(--baseline)', 'stroke-width':1, visibility:'hidden'});
+    svg.appendChild(crosshair);
+    function onMove(evt) {
+      const rect = svg.getBoundingClientRect();
+      const px = (evt.clientX - rect.left) / rect.width * W;
+      let i = Math.round((px - padL) / (W - padL - padR) * (n-1));
+      i = Math.max(0, Math.min(n-1, i));
+      const cx = xScale(i,W);
+      crosshair.setAttribute('x1', cx); crosshair.setAttribute('x2', cx); crosshair.setAttribute('visibility','visible');
+      const d = daily[i], r = ind[i];
+      tooltip.style.display = 'block';
+      tooltip.style.left = Math.min(rect.width-190, Math.max(0,(px/W)*rect.width+10)) + 'px';
+      tooltip.style.top = '10px';
+      tooltip.innerHTML = '';
+      const dateEl = document.createElement('div'); dateEl.className='t-date'; dateEl.textContent = d.date;
+      tooltip.appendChild(dateEl);
+      const rows = [
+        ['開', fmt(d.open,1), null], ['高', fmt(d.high,1), null], ['低', fmt(d.low,1), null], ['收', fmt(d.close,1), null],
+        ['MA5', fmt(r.ma5,1), 'var(--ma5)'], ['MA20', fmt(r.ma20,1), 'var(--ma20)'], ['MA60', fmt(r.ma60,1), 'var(--ma60)']
+      ];
+      rows.forEach(([k,v,color])=>{
+        const row = document.createElement('div'); row.className='t-row';
+        const kEl = document.createElement('span'); kEl.className='k';
+        if (color) { const key = document.createElement('span'); key.className='tkey'; key.style.background=color; kEl.appendChild(key); }
+        const kt = document.createElement('span'); kt.textContent = k; kEl.appendChild(kt);
+        const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = v;
+        row.appendChild(kEl); row.appendChild(vEl); tooltip.appendChild(row);
+      });
+    }
+    svg.addEventListener('pointermove', onMove);
+    svg.addEventListener('pointerleave', () => { tooltip.style.display='none'; crosshair.setAttribute('visibility','hidden'); });
+  })();
+
+  // ---- volume ----
+  (function(){
+    const svg = document.getElementById('chart-volume');
+    const W=900,H=70,padT=6,padB=4;
+    const maxV = Math.max(...daily.map(d=>d.volume));
+    function y(v){ return padT + (H-padT-padB)*(1-v/maxV); }
+    const barW = Math.max(1, (W-padL-padR)/n*0.7);
+    daily.forEach((d,i)=>{
+      const up = d.close>=d.open;
+      svg.appendChild(el('rect', {x:xScale(i,W)-barW/2, y:y(d.volume), width:barW, height:H-padB-y(d.volume), fill: up?'var(--up)':'var(--down)', opacity:0.55}));
+    });
+    axisLabel(svg, padL-6, padT+6, (maxV/1000).toFixed(0)+'K');
+  })();
+
+  // ---- RSI ----
+  (function(){
+    const svg = document.getElementById('chart-rsi');
+    const W=900,H=90,padT=8,padB=16;
+    function y(v){ return padT + (H-padT-padB)*(1-v/100); }
+    [30,50,70,75].forEach(v=>{
+      svg.appendChild(el('line',{x1:padL,x2:W-padR,y1:y(v),y2:y(v),stroke:'var(--grid)','stroke-width':1}));
+      axisLabel(svg, padL-6, y(v)+3, String(v));
+    });
+    let d='';
+    ind.forEach((r,i)=>{ if(r.rsi14!=null){ const cmd=d?'L':'M'; d+=cmd+' '+xScale(i,W)+','+y(r.rsi14)+' '; } });
+    if(d) svg.appendChild(el('path',{d,fill:'none',stroke:'var(--ma60)','stroke-width':2,'stroke-linecap':'round'}));
+  })();
+
+  // ---- MACD ----
+  (function(){
+    const svg = document.getElementById('chart-macd');
+    const W=900,H=110,padT=8,padB=16;
+    const vals = ind.flatMap(r=>[r.macd,r.signal,r.histogram]).filter(v=>v!=null);
+    const ext = Math.max(...vals.map(Math.abs));
+    function y(v){ return padT + (H-padT-padB)*(1-(v+ext)/(2*ext)); }
+    svg.appendChild(el('line',{x1:padL,x2:W-padR,y1:y(0),y2:y(0),stroke:'var(--baseline)','stroke-width':1}));
+    const barW = Math.max(1, (W-padL-padR)/n*0.6);
+    ind.forEach((r,i)=>{ if(r.histogram!=null){
+      const yy = y(Math.max(0,r.histogram)), hh = Math.abs(y(r.histogram)-y(0));
+      svg.appendChild(el('rect',{x:xScale(i,W)-barW/2,y:yy,width:barW,height:Math.max(1,hh), fill: r.histogram>=0?'var(--macd-hist-pos)':'var(--macd-hist-neg)'}));
+    }});
+    function drawLine(key,colorVar){
+      let d='';
+      ind.forEach((r,i)=>{ if(r[key]!=null){ const cmd=d?'L':'M'; d+=cmd+' '+xScale(i,W)+','+y(r[key])+' '; } });
+      if(d) svg.appendChild(el('path',{d,fill:'none',stroke:colorVar,'stroke-width':2,'stroke-linecap':'round'}));
+    }
+    drawLine('macd','var(--ma5)'); drawLine('signal','var(--ma60)');
+    const legend = document.getElementById('macd-legend');
+    [['MACD','var(--ma5)'],['Signal','var(--ma60)'],['Histogram','var(--macd-hist-pos)']].forEach(([label,color])=>{
+      const item = document.createElement('div'); item.className='legend-item';
+      const sw = document.createElement('span'); sw.className='legend-swatch'; sw.style.background=color;
+      const t = document.createElement('span'); t.textContent = label;
+      item.appendChild(sw); item.appendChild(t); legend.appendChild(item);
+    });
+  })();
+
+  // ---- screen-reader table (accessibility: table view of underlying data) ----
+  (function(){
+    const table = document.getElementById('data-table');
+    const thead = document.createElement('thead');
+    thead.innerHTML = '';
+    const headRow = document.createElement('tr');
+    ['日期','開盤','最高','最低','收盤','成交量','MA5','MA20','MA60','RSI14'].forEach(h=>{
+      const th = document.createElement('th'); th.textContent = h; headRow.appendChild(th);
+    });
+    thead.appendChild(headRow); table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    daily.forEach((d,i)=>{
+      const r = ind[i]; const tr = document.createElement('tr');
+      [d.date,d.open,d.high,d.low,d.close,d.volume,r.ma5,r.ma20,r.ma60,r.rsi14].forEach(v=>{
+        const td = document.createElement('td'); td.textContent = v==null? '': v; tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+  })();
+})();
+</script>

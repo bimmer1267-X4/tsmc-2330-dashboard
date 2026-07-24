@@ -1,0 +1,14 @@
+{
+  "forecastEpsFullYear": 100,
+  "forecastSource": "法人共識水準（2026/07多家外資目標價與EPS上修報告隱含，約落在95~105元區間，此處取整數100元為預設，可請Claude隨時更新）",
+  "priorYearFullEps": 66.26,
+  "priorYearFullEpsSource": "Yahoo股市2330 EPS歷史頁面 2025 Q1~Q4加總(13.95+15.36+17.44+19.51)，已與財報狗網站獨立公布的「近四季EPS」數字交叉驗證一致",
+  "priorYearH1Eps": 29.31,
+  "priorYearH1EpsNote": "2025 Q1(13.95)+Q2(15.36)，用於H1年增率合理性檢查的基期",
+  "priorYearH2Eps": 36.95,
+  "priorYearH2EpsNote": "2025 Q3(17.44)+Q4(19.51)，用於推算「預估隱含H2年增率」是否合理",
+  "supplementalQuarterlyEps": [
+    { "year": 2026, "season": 2, "eps": 27.25, "source": "台積電法說會(2026/07)，經濟日報/NOWnews/MoneyDJ交叉驗證一致", "officialFiled": false }
+  ],
+  "updatedAt": "2026-07-22T08:30:00+08:00"
+}
