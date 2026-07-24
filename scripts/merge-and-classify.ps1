@@ -1,21 +1,54 @@
 ﻿<#
-  合併 ADR / 匯率資料（由 Claude 透過 WebFetch 交叉比對兩來源後取得）進 data.json，
+  合併 ADR / 匯率資料（由 Claude 透過 WebFetch 交叉比對兩來源後取得；若省略參數則自動
+  改用 Yahoo Finance 單一來源抓取，供排程自動化使用）進 data.json，
   並依「估值分區框架」計算目前價格所屬區間：便宜價／甜甜價／正常／超貴價。
 
-  用法：
+  用法（手動交叉比對）：
     .\merge-and-classify.ps1 -AdrPrice 424.61 -AdrChangePct 5.55 -AdrQuoteTime "2026-07-21T16:00:00-04:00" `
         -UsdTwd 32.325 -FxQuoteTime "2026-07-22T08:02:00+08:00"
+
+  用法（排程自動化，省略參數即自動從 Yahoo Finance 抓取 ADR/匯率）：
+    .\merge-and-classify.ps1
 #>
 param(
-    [Parameter(Mandatory=$true)][double]$AdrPrice,
-    [Parameter(Mandatory=$true)][double]$AdrChangePct,
-    [Parameter(Mandatory=$true)][string]$AdrQuoteTime,
-    [Parameter(Mandatory=$true)][double]$UsdTwd,
-    [Parameter(Mandatory=$true)][string]$FxQuoteTime,
+    [double]$AdrPrice,
+    [double]$AdrChangePct,
+    [string]$AdrQuoteTime,
+    [double]$UsdTwd,
+    [string]$FxQuoteTime,
     [double]$AdrRatio = 5
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-YahooQuote([string]$Symbol) {
+    $url = "https://query1.finance.yahoo.com/v8/finance/chart/$Symbol`?interval=1d&range=5d"
+    $resp = Invoke-RestMethod -Uri $url -Headers @{ "User-Agent" = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)" }
+    $meta = $resp.chart.result[0].meta
+    if ($null -eq $meta) { throw "Yahoo Finance 無資料: $Symbol" }
+    $price = $meta.regularMarketPrice
+    $prevClose = if ($meta.previousClose) { $meta.previousClose } else { $meta.chartPreviousClose }
+    $changePct = if ($prevClose) { [math]::Round(($price / $prevClose - 1) * 100, 2) } else { $null }
+    $quoteTime = ([datetimeoffset]::FromUnixTimeSeconds($meta.regularMarketTime)).UtcDateTime.ToString("o")
+    return [PSCustomObject]@{ price = $price; changePct = $changePct; quoteTime = $quoteTime }
+}
+
+$sources = @("stockanalysis.com", "finance.yahoo.com")
+$fxSource = "tw.stock.yahoo.com USDTWD=X"
+
+if (-not $AdrPrice -or -not $AdrQuoteTime -or -not $UsdTwd -or -not $FxQuoteTime) {
+    Write-Host "未提供 -AdrPrice/-UsdTwd 等參數，改用 Yahoo Finance 自動抓取 ADR(TSM) 與 USD/TWD..."
+    $adrAuto = Get-YahooQuote "TSM"
+    $fxAuto = Get-YahooQuote "TWD=X"
+    $AdrPrice = $adrAuto.price
+    $AdrChangePct = $adrAuto.changePct
+    $AdrQuoteTime = $adrAuto.quoteTime
+    $UsdTwd = $fxAuto.price
+    $FxQuoteTime = $fxAuto.quoteTime
+    $sources = @("query1.finance.yahoo.com (TSM)")
+    $fxSource = "query1.finance.yahoo.com (TWD=X)"
+}
+
 $path = Join-Path $PSScriptRoot "..\data\data.json"
 $d = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json
 
@@ -23,13 +56,13 @@ $d.adr = [PSCustomObject]@{
     price     = $AdrPrice
     changePct = $AdrChangePct
     quoteTime = $AdrQuoteTime
-    sources   = @("stockanalysis.com", "finance.yahoo.com")
+    sources   = $sources
     ratio     = $AdrRatio
 }
 $d.fxRate = [PSCustomObject]@{
     usdTwd    = $UsdTwd
     quoteTime = $FxQuoteTime
-    source    = "tw.stock.yahoo.com USDTWD=X"
+    source    = $fxSource
 }
 
 $impliedTwd = [math]::Round(($AdrPrice / $AdrRatio) * $UsdTwd, 2)
