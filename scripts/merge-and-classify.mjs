@@ -1,12 +1,16 @@
-// 合併 ADR / 匯率資料（呼叫端透過 WebFetch 交叉比對兩來源後取得）進 data.json，
+// 合併 ADR / 匯率資料（呼叫端透過 WebFetch 交叉比對兩來源後取得，或於未提供參數時
+// 自動改用 Yahoo Finance 單一來源抓取，供排程自動化使用）進 data.json，
 // 並依「估值分區框架」計算目前價格所屬區間：便宜價／甜甜價／正常／超貴價，
 // 以及「全年預估EPS」(config.json) 換算的 Forward PE / PEG 分區。
 // 跨平台版本 (Node.js)，邏輯與 merge-and-classify.ps1 對等。
 //
-// 用法：
+// 用法（手動交叉比對）：
 //   node merge-and-classify.mjs --adr-price 424.61 --adr-change-pct 5.55 \
 //     --adr-quote-time 2026-07-21T16:00:00-04:00 --usd-twd 32.325 \
 //     --fx-quote-time 2026-07-22T08:02:00+08:00
+//
+// 用法（排程自動化，省略上述參數即自動從 Yahoo Finance 抓取 ADR/匯率）：
+//   node merge-and-classify.mjs
 
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -15,6 +19,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = join(__dirname, "..", "data", "data.json");
 const CONFIG_PATH = join(__dirname, "..", "data", "config.json");
+const YF_UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
 
 function parseArgs(argv) {
   const out = {};
@@ -26,6 +31,36 @@ function parseArgs(argv) {
     }
   }
   return out;
+}
+
+async function fetchYahooQuote(symbol) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
+  const res = await fetch(url, { headers: { "User-Agent": YF_UA } });
+  if (!res.ok) throw new Error(`Yahoo Finance HTTP ${res.status} for ${symbol}`);
+  const json = await res.json();
+  const result = json?.chart?.result?.[0];
+  if (!result?.meta) throw new Error(`Yahoo Finance 無資料: ${symbol}`);
+  const { meta } = result;
+  const price = meta.regularMarketPrice;
+  const previousClose = meta.previousClose ?? meta.chartPreviousClose;
+  const changePct = previousClose ? Math.round((price / previousClose - 1) * 10000) / 100 : null;
+  const quoteTime = new Date(meta.regularMarketTime * 1000).toISOString();
+  return { price, changePct, quoteTime };
+}
+
+// 排程自動化用：單一來源（Yahoo Finance），非人工交叉比對，僅供無法互動時的 fallback。
+async function autoFetchAdrAndFx() {
+  console.log("未提供 --adr-price/--usd-twd 等參數，改用 Yahoo Finance 自動抓取 ADR(TSM) 與 USD/TWD...");
+  const [adr, fx] = await Promise.all([fetchYahooQuote("TSM"), fetchYahooQuote("TWD=X")]);
+  return {
+    adrPrice: adr.price,
+    adrChangePct: adr.changePct,
+    adrQuoteTime: adr.quoteTime,
+    usdTwd: fx.price,
+    fxQuoteTime: fx.quoteTime,
+    sources: ["query1.finance.yahoo.com (TSM)"],
+    fxSource: "query1.finance.yahoo.com (TWD=X)",
+  };
 }
 
 function classifyZone(pe, rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60, peLabel) {
@@ -53,16 +88,24 @@ function classifyZone(pe, rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const adrPrice = Number(args["adr-price"]);
-  const adrChangePct = Number(args["adr-change-pct"]);
-  const adrQuoteTime = args["adr-quote-time"];
-  const usdTwd = Number(args["usd-twd"]);
-  const fxQuoteTime = args["fx-quote-time"];
+  let adrPrice = Number(args["adr-price"]);
+  let adrChangePct = Number(args["adr-change-pct"]);
+  let adrQuoteTime = args["adr-quote-time"];
+  let usdTwd = Number(args["usd-twd"]);
+  let fxQuoteTime = args["fx-quote-time"];
   const adrRatio = Number(args["adr-ratio"] ?? 5);
+  let sources = ["stockanalysis.com", "finance.yahoo.com"];
+  let fxSource = "tw.stock.yahoo.com USDTWD=X";
 
   if (!adrPrice || !adrQuoteTime || !usdTwd || !fxQuoteTime) {
-    console.error("缺少必要參數：--adr-price --adr-change-pct --adr-quote-time --usd-twd --fx-quote-time");
-    process.exit(1);
+    const auto = await autoFetchAdrAndFx();
+    adrPrice = auto.adrPrice;
+    adrChangePct = auto.adrChangePct;
+    adrQuoteTime = auto.adrQuoteTime;
+    usdTwd = auto.usdTwd;
+    fxQuoteTime = auto.fxQuoteTime;
+    sources = auto.sources;
+    fxSource = auto.fxSource;
   }
 
   const d = JSON.parse(await readFile(DATA_PATH, "utf8"));
@@ -71,10 +114,10 @@ async function main() {
     price: adrPrice,
     changePct: adrChangePct,
     quoteTime: adrQuoteTime,
-    sources: ["stockanalysis.com", "finance.yahoo.com"],
+    sources,
     ratio: adrRatio,
   };
-  d.fxRate = { usdTwd, quoteTime: fxQuoteTime, source: "tw.stock.yahoo.com USDTWD=X" };
+  d.fxRate = { usdTwd, quoteTime: fxQuoteTime, source: fxSource };
 
   const impliedTwd = Math.round(((adrPrice / adrRatio) * usdTwd) * 100) / 100;
   const premiumPct = Math.round((((impliedTwd - d.valuation.closePrice) / d.valuation.closePrice) * 100) * 100) / 100;
