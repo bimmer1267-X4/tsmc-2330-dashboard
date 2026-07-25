@@ -171,6 +171,68 @@ function buildOpenGapModel(adrSeries, fxSeries, twDaily) {
 
 function round(v, d) { const f = 10 ** d; return Math.round(v * f) / f; }
 
+const ANALOG_TOLERANCE_TIERS = [1.5, 2.5, 4, 6];
+const ANALOG_MIN_MATCHES = 3;
+
+// 歷史相近ADR價位類比法：今天ADR收盤價為X，在近6個月歷史中找ADR收盤價與X相差在容忍度內的
+// 交易日，取當時的匯率換算台股價、以及對應台股交易日的開盤價，最後取這些開盤價的平均值，
+// 當作「開盤價機率預估」(OLS迴歸)之外的另一種類比估計。容忍度由窄到寬逐級嘗試，確保至少
+// 抓到 ANALOG_MIN_MATCHES 筆比對，避免股價創新高/新低時完全找不到歷史相近值。
+function matchAtTolerance(todayAdrPrice, adrSeries, fxSeries, twDaily, tolerancePct) {
+  const adrDates = adrSeries.map((s) => s.date).sort();
+  const adrMap = new Map(adrSeries.map((s) => [s.date, s.close]));
+  const fxMap = new Map(fxSeries.map((s) => [s.date, s.close]));
+  const fxDates = fxSeries.map((s) => s.date).sort();
+  const todayDate = adrDates[adrDates.length - 1];
+
+  const matches = [];
+  for (const D of adrDates) {
+    if (D === todayDate) continue; // 排除今天自己
+    const adrClose = adrMap.get(D);
+    const diffPct = (adrClose / todayAdrPrice - 1) * 100;
+    if (Math.abs(diffPct) > tolerancePct) continue;
+
+    const fx = nearestOnOrBefore(fxMap, fxDates, D);
+    if (fx == null) continue;
+
+    let tIdx = -1;
+    for (let j = 0; j < twDaily.length; j++) {
+      if (twDaily[j].date > D) { tIdx = j; break; }
+    }
+    if (tIdx < 0) continue;
+    const T = twDaily[tIdx];
+
+    matches.push({
+      adrDate: D,
+      adrPrice: round(adrClose, 2),
+      diffPct: round(diffPct, 2),
+      fxRate: round(fx, 3),
+      impliedTwd: round((adrClose / 5) * fx, 2),
+      twDate: T.date,
+      twOpen: T.open,
+    });
+  }
+
+  // 同一台股交易日可能對應多個ADR日期，只留每個台股交易日最後一筆。
+  const byTwDate = new Map();
+  for (const m of matches) byTwDate.set(m.twDate, m);
+  return [...byTwDate.values()].sort((a, b) => (a.twDate < b.twDate ? -1 : 1));
+}
+
+function findAnalogMatches(todayAdrPrice, adrSeries, fxSeries, twDaily) {
+  let best = [];
+  let usedTolerance = ANALOG_TOLERANCE_TIERS[ANALOG_TOLERANCE_TIERS.length - 1];
+  for (const tolerancePct of ANALOG_TOLERANCE_TIERS) {
+    const uniq = matchAtTolerance(todayAdrPrice, adrSeries, fxSeries, twDaily, tolerancePct);
+    best = uniq;
+    usedTolerance = tolerancePct;
+    if (uniq.length >= ANALOG_MIN_MATCHES) break;
+  }
+  if (best.length === 0) return null;
+  const avgTwOpen = round(mean(best.map((m) => m.twOpen)), 2);
+  return { tolerancePct: usedTolerance, todayAdrPrice: round(todayAdrPrice, 2), matches: best, avgTwOpen, count: best.length };
+}
+
 function classifyZone(pe, rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60, peLabel) {
   const reasons = [];
   if (pe > 28) reasons.push(`${peLabel} ${pe.toFixed(1)} 倍 > 28倍上緣`);
@@ -361,6 +423,21 @@ async function main() {
       }
     } catch (e) {
       console.warn("開盤價機率預估計算失敗，略過: " + e.message);
+    }
+  }
+
+  // ---- ADR歷史相近價位類比估計 ----
+  if (adrDaily && fxDaily) {
+    try {
+      const analog = findAnalogMatches(adrPrice, adrDaily.series, fxDaily.series, d.daily);
+      if (analog) {
+        d.adrAnalogMatches = analog;
+        console.log(`歷史相近ADR價位比對: ${analog.count}筆 (±${analog.tolerancePct}%)  平均對應台股開盤價: ${analog.avgTwOpen}`);
+      } else {
+        console.warn("近6個月無相近ADR價位可比對，略過類比估計");
+      }
+    } catch (e) {
+      console.warn("歷史相近ADR價位比對計算失敗，略過: " + e.message);
     }
   }
 
