@@ -329,6 +329,14 @@
       c.appendChild(zh); c.appendChild(zr); container.appendChild(c);
     });
   }
+  // 純粹依「當日收盤價」落在哪個價位帶門檻區間，跟完整分類(含RSI/ADR溢價/近高點等覆蓋條件)分開判斷，
+  // 讓框選視覺直接反映當下股價的位置，不受其他技術面因素影響。
+  function priceBandZone(price, thresholds) {
+    if (price < thresholds.cheapMax) return '便宜價';
+    if (price < thresholds.sweetMax) return '甜甜價';
+    if (price < thresholds.normalMax) return '正常';
+    return '超貴價';
+  }
   // ---- 全年預估EPS估值卡（官方預估 / 個人試算 雙軌） ----
   (function(){
     const off = raw.officialForecast;
@@ -391,7 +399,7 @@
         const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
         d.appendChild(l); d.appendChild(v); mg.appendChild(d);
       });
-      renderZoneCards('forecast-zones-grid', result.thresholds, result.zone);
+      renderZoneCards('forecast-zones-grid', result.thresholds, priceBandZone(last.close, result.thresholds));
       document.getElementById('forecast-reasons').textContent = '目前判定依據：' + result.reasons.join('；');
       const warnEl = document.getElementById('forecast-warning');
       if (result.warning) { warnEl.textContent = '⚠️ ' + result.warning; warnEl.classList.add('show'); }
