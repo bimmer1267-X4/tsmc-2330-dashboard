@@ -185,6 +185,12 @@ $d.fxRate = [PSCustomObject]@{
     source    = $fxSource
 }
 
+# ADR近6個月最高收盤價(美元)，取自本次一併抓取的ADR歷史序列(供開盤價迴歸訓練用)。
+if ($adrDaily) {
+    $adrSixMonthHighUsd = [math]::Round(($adrDaily.series | Measure-Object -Property close -Maximum).Maximum, 2)
+    $d | Add-Member -NotePropertyName adrSixMonthHighUsd -NotePropertyValue $adrSixMonthHighUsd -Force
+}
+
 $impliedTwd = [math]::Round(($AdrPrice / $AdrRatio) * $UsdTwd, 2)
 $premiumPct = [math]::Round((($impliedTwd - $d.valuation.closePrice) / $d.valuation.closePrice) * 100, 2)
 
