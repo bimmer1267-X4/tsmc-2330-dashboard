@@ -710,4 +710,21 @@
     table.appendChild(tbody);
   })();
 })();
+
+// 若被嵌入 iframe（例如 shunshun.dev 首頁），主動回報實際內容高度給父頁面，
+// 讓父頁面可以動態調整 iframe 高度，不需要內縮捲軸。
+(function () {
+  if (window.self === window.top) return;
+  function postHeight() {
+    parent.postMessage({ type: 'tsmc-dashboard-height', height: document.documentElement.scrollHeight }, '*');
+  }
+  window.addEventListener('load', postHeight);
+  window.addEventListener('resize', postHeight);
+  if (window.ResizeObserver) {
+    new ResizeObserver(postHeight).observe(document.body);
+  } else {
+    setInterval(postHeight, 1000);
+  }
+  postHeight();
+})();
 </script>
