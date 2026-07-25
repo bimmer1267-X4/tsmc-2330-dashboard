@@ -142,6 +142,59 @@ function Get-OpenGapModel($adrSeries, $fxSeries, $twDaily) {
     return [PSCustomObject]@{ beta = $reg.beta; alpha = $reg.alpha; r = $reg.r; r2 = $reg.r2; n = $reg.n; residualStd = $residualStd; hitRate = $hitRate }
 }
 
+$AnalogToleranceTiers = @(1.5, 2.5, 4, 6)
+$AnalogMinMatches = 3
+
+# 歷史相近ADR價位類比法：今天ADR收盤價為X，在近6個月歷史中找ADR收盤價與X相差在容忍度內的
+# 交易日，取當時的匯率換算台股價、以及對應台股交易日的開盤價，最後取這些開盤價的平均值，
+# 當作「開盤價機率預估」(OLS迴歸)之外的另一種類比估計。容忍度由窄到寬逐級嘗試，確保至少
+# 抓到 AnalogMinMatches 筆比對，避免股價創新高/新低時完全找不到歷史相近值。
+function Get-AnalogMatchesAtTolerance($todayAdrPrice, $adrSeries, $fxSeries, $twDaily, [double]$TolerancePct) {
+    $adrDates = @($adrSeries | ForEach-Object { $_.date } | Sort-Object)
+    $adrMap = @{}; foreach ($s in $adrSeries) { $adrMap[$s.date] = $s.close }
+    $fxMap = @{}; foreach ($s in $fxSeries) { $fxMap[$s.date] = $s.close }
+    $fxDates = @($fxSeries | ForEach-Object { $_.date } | Sort-Object)
+    $todayDate = $adrDates[$adrDates.Count - 1]
+
+    $matchesByTwDate = @{}
+    foreach ($D in $adrDates) {
+        if ($D -eq $todayDate) { continue }
+        $adrClose = $adrMap[$D]
+        $diffPct = ($adrClose / $todayAdrPrice - 1) * 100
+        if ([math]::Abs($diffPct) -gt $TolerancePct) { continue }
+
+        $fx = Find-NearestOnOrBefore $fxMap $fxDates $D
+        if ($null -eq $fx) { continue }
+
+        $tIdx = -1
+        for ($j = 0; $j -lt $twDaily.Count; $j++) {
+            if ($twDaily[$j].date -gt $D) { $tIdx = $j; break }
+        }
+        if ($tIdx -lt 0) { continue }
+        $T = $twDaily[$tIdx]
+
+        # 同一台股交易日可能對應多個ADR日期，只留每個台股交易日最後一筆
+        $matchesByTwDate[$T.date] = [PSCustomObject]@{
+            adrDate = $D; adrPrice = [math]::Round($adrClose, 2); diffPct = [math]::Round($diffPct, 2)
+            fxRate = [math]::Round($fx, 3); impliedTwd = [math]::Round(($adrClose / 5) * $fx, 2)
+            twDate = $T.date; twOpen = $T.open
+        }
+    }
+    return @($matchesByTwDate.Values | Sort-Object twDate)
+}
+
+function Get-AnalogMatches($todayAdrPrice, $adrSeries, $fxSeries, $twDaily) {
+    $best = @(); $usedTolerance = $AnalogToleranceTiers[$AnalogToleranceTiers.Count - 1]
+    foreach ($tolerancePct in $AnalogToleranceTiers) {
+        $uniq = Get-AnalogMatchesAtTolerance $todayAdrPrice $adrSeries $fxSeries $twDaily $tolerancePct
+        $best = $uniq; $usedTolerance = $tolerancePct
+        if ($uniq.Count -ge $AnalogMinMatches) { break }
+    }
+    if ($best.Count -eq 0) { return $null }
+    $avgTwOpen = [math]::Round((Get-Mean ($best | ForEach-Object { $_.twOpen })), 2)
+    return [PSCustomObject]@{ tolerancePct = $usedTolerance; todayAdrPrice = [math]::Round($todayAdrPrice, 2); matches = $best; avgTwOpen = $avgTwOpen; count = $best.Count }
+}
+
 $sources = @("stockanalysis.com", "finance.yahoo.com")
 $fxSource = "tw.stock.yahoo.com USDTWD=X"
 
@@ -340,6 +393,21 @@ if ($adrDaily -and $fxDaily) {
         }
     } catch {
         Write-Warning "開盤價機率預估計算失敗，略過: $($_.Exception.Message)"
+    }
+}
+
+# ---- ADR歷史相近價位類比估計 ----
+if ($adrDaily -and $fxDaily) {
+    try {
+        $analog = Get-AnalogMatches $AdrPrice $adrDaily.series $fxDaily.series $d.daily
+        if ($analog) {
+            $d | Add-Member -NotePropertyName adrAnalogMatches -NotePropertyValue $analog -Force
+            Write-Host "歷史相近ADR價位比對: $($analog.count)筆 (±$($analog.tolerancePct)%)  平均對應台股開盤價: $($analog.avgTwOpen)"
+        } else {
+            Write-Warning "近6個月無相近ADR價位可比對，略過類比估計"
+        }
+    } catch {
+        Write-Warning "歷史相近ADR價位比對計算失敗，略過: $($_.Exception.Message)"
     }
 }
 

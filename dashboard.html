@@ -73,6 +73,13 @@
   .warning-banner { background: var(--warning); color: #1a1200; opacity: 0.95; border-radius: 8px; padding: 8px 12px; font-size: 12px; margin-top: 10px; display: none; }
   .warning-banner.show { display: block; }
   .forecast-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .analog-scroll { overflow-x: auto; margin-top: 12px; }
+  .analog-table { width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap; }
+  .analog-table th, .analog-table td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  .analog-table th:first-child, .analog-table td:first-child,
+  .analog-table th:nth-child(6), .analog-table td:nth-child(6) { text-align: left; }
+  .analog-table th { color: var(--muted); font-weight: 600; font-size: 11px; white-space: nowrap; }
+  .analog-table tbody tr:hover { background: var(--page); }
 </style>
 
 <div class="card">
@@ -105,6 +112,25 @@
   </div>
   <div class="metrics" id="prediction-metrics"></div>
   <div class="src" id="prediction-model-note"></div>
+</div>
+
+<div class="card" id="adr-analog-card">
+  <div style="font-weight:600; margin-bottom:2px;">ADR歷史相近價位類比估計</div>
+  <div class="sub" id="analog-sub">近6個月中，找出ADR收盤價與今天相近的歷史交易日，取當時對應的台股開盤價，平均後作為另一種開盤價估計</div>
+  <div class="header-row">
+    <div>
+      <div class="hero" id="analog-avg-price" style="font-size:36px;">--</div>
+      <div class="src" id="analog-count-note"></div>
+    </div>
+  </div>
+  <div class="analog-scroll">
+    <table class="analog-table" id="analog-table">
+      <thead>
+        <tr><th>ADR日期</th><th>ADR收盤(美元)</th><th>與今日差</th><th>當時匯率</th><th>換算台股價</th><th>對應台股日期</th><th>台股開盤價</th></tr>
+      </thead>
+      <tbody id="analog-tbody"></tbody>
+    </table>
+  </div>
 </div>
 
 <div class="card">
@@ -229,6 +255,35 @@
     });
     document.getElementById('prediction-model-note').textContent =
       '模型：開盤缺口% = ' + fmt(m.beta,3) + ' × ADR漲跌% + ' + fmt(m.alpha,3) + '（OLS迴歸，殘差標準差 ' + fmt(m.residualStd,2) + '%，假設常態分布估算機率）。⚠️ 純統計關係，不構成投資建議，不保證準確，實際開盤仍以台股交易所公告為準。';
+  })();
+
+  // ---- ADR歷史相近價位類比估計 ----
+  (function(){
+    const analog = raw.adrAnalogMatches;
+    const card = document.getElementById('adr-analog-card');
+    if (!analog || !analog.matches || !analog.matches.length) { if (card) card.style.display = 'none'; return; }
+
+    document.getElementById('analog-avg-price').textContent = fmt(analog.avgTwOpen,0) + ' 元';
+    document.getElementById('analog-count-note').textContent =
+      '依 ' + analog.count + ' 個歷史交易日的對應台股開盤價取平均（ADR收盤價與今日 $' + fmt(analog.todayAdrPrice,2) + ' 相差在 ±' + fmt(analog.tolerancePct,1) + '% 內），此為每日動態重算的類比估計，非統計迴歸';
+    document.getElementById('analog-sub').textContent =
+      '近6個月中，找出ADR收盤價與今天($'+fmt(analog.todayAdrPrice,2)+')相近的歷史交易日，取當時對應的台股開盤價，平均後作為另一種開盤價估計';
+
+    const tbody = document.getElementById('analog-tbody');
+    analog.matches.forEach((m) => {
+      const tr = document.createElement('tr');
+      const cells = [
+        m.adrDate,
+        '$'+fmt(m.adrPrice,2),
+        (m.diffPct>=0?'+':'')+fmt(m.diffPct,2)+'%',
+        fmt(m.fxRate,3),
+        fmt(m.impliedTwd,0)+' 元',
+        m.twDate,
+        fmt(m.twOpen,0)+' 元'
+      ];
+      cells.forEach((c) => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
+      tbody.appendChild(tr);
+    });
   })();
 
   const zoneColorKey = {'便宜價':'good','甜甜價':'sweet','正常':'muted','超貴價':'critical'};
