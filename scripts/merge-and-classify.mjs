@@ -240,6 +240,11 @@ async function main() {
   };
   d.fxRate = { usdTwd, quoteTime: fxQuoteTime, source: fxSource };
 
+  // ADR近6個月最高收盤價(美元)，取自本次一併抓取的ADR歷史序列(供開盤價迴歸訓練用)。
+  if (adrDaily) {
+    d.adrSixMonthHighUsd = round(Math.max(...adrDaily.series.map((s) => s.close)), 2);
+  }
+
   const impliedTwd = Math.round(((adrPrice / adrRatio) * usdTwd) * 100) / 100;
   const premiumPct = Math.round((((impliedTwd - d.valuation.closePrice) / d.valuation.closePrice) * 100) * 100) / 100;
 

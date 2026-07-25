@@ -170,18 +170,26 @@
   const sixMonthHighClose = Math.max(...daily.map((d) => d.close));
   document.getElementById('trapped-price').textContent = fmt(sixMonthHighClose,0) + ' 元';
 
+  const adrTrappedNote = raw.adrSixMonthHighUsd!=null ? '套牢價 $'+fmt(raw.adrSixMonthHighUsd,2) : null;
   const metrics = [
-    ['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)'],
+    ['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)', adrTrappedNote],
     ['ADR換算台股價', fmt(raw.adrImpliedTwd,0)+' 元'],
     ['ADR溢價', (raw.adrPremiumPct>=0?'+':'')+raw.adrPremiumPct+'%'],
     ['USD/TWD', fmt(fx.usdTwd,3)]
   ];
   const mg = document.getElementById('metrics-grid');
-  metrics.forEach(([label, value]) => {
+  metrics.forEach(([label, value, note]) => {
     const d = document.createElement('div');
     const l = document.createElement('div'); l.className='metric-label'; l.textContent = label;
     const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
-    d.appendChild(l); d.appendChild(v); mg.appendChild(d);
+    d.appendChild(l); d.appendChild(v);
+    if (note) {
+      const noteEl = document.createElement('div');
+      noteEl.style.color = 'var(--critical)'; noteEl.style.fontSize = '12px'; noteEl.style.fontWeight = '700'; noteEl.style.marginTop = '2px';
+      noteEl.textContent = note;
+      d.appendChild(noteEl);
+    }
+    mg.appendChild(d);
   });
 
   // ---- 今日台股開盤價機率預估 ----
