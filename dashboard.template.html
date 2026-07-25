@@ -126,7 +126,7 @@
   <div class="analog-scroll">
     <table class="analog-table" id="analog-table">
       <thead>
-        <tr><th>ADR日期</th><th>ADR收盤(美元)</th><th>與今日差</th><th>當時匯率</th><th>換算台股價(溢價%)</th><th>對應台股日期</th><th>台股開盤價</th></tr>
+        <tr><th>ADR日期</th><th>ADR收盤(美元)</th><th>與今日差</th><th>當時匯率</th><th>換算台股價(溢價%)</th><th>對應台股日期</th><th>台股開盤價</th><th>當前匯率對應價格</th></tr>
       </thead>
       <tbody id="analog-tbody"></tbody>
     </table>
@@ -289,6 +289,13 @@
 
       addTd(m.twDate);
       addTd(fmt(m.twOpen,0)+' 元');
+
+      const currentFxAdjustedTwPrice = (m.twOpen / m.fxRate) * fx.usdTwd;
+      const currentFxTd = document.createElement('td');
+      currentFxTd.style.color = 'var(--critical)'; currentFxTd.style.fontWeight = '700';
+      currentFxTd.textContent = fmt(currentFxAdjustedTwPrice,0) + ' 元';
+      tr.appendChild(currentFxTd);
+
       tbody.appendChild(tr);
     });
   })();
