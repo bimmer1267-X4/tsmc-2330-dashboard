@@ -126,7 +126,7 @@
   <div class="analog-scroll">
     <table class="analog-table" id="analog-table">
       <thead>
-        <tr><th>ADR日期</th><th>ADR收盤(美元)</th><th>與今日差</th><th>當時匯率</th><th>換算台股價</th><th>對應台股日期</th><th>台股開盤價</th></tr>
+        <tr><th>ADR日期</th><th>ADR收盤(美元)</th><th>與今日差</th><th>當時匯率</th><th>換算台股價(溢價%)</th><th>對應台股日期</th><th>台股開盤價</th></tr>
       </thead>
       <tbody id="analog-tbody"></tbody>
     </table>
@@ -272,16 +272,23 @@
     const tbody = document.getElementById('analog-tbody');
     analog.matches.forEach((m) => {
       const tr = document.createElement('tr');
-      const cells = [
-        m.adrDate,
-        '$'+fmt(m.adrPrice,2),
-        (m.diffPct>=0?'+':'')+fmt(m.diffPct,2)+'%',
-        fmt(m.fxRate,3),
-        fmt(m.impliedTwd,0)+' 元',
-        m.twDate,
-        fmt(m.twOpen,0)+' 元'
-      ];
-      cells.forEach((c) => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
+      const addTd = (text) => { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); return td; };
+      addTd(m.adrDate);
+      addTd('$'+fmt(m.adrPrice,2));
+      addTd((m.diffPct>=0?'+':'')+fmt(m.diffPct,2)+'%');
+      addTd(fmt(m.fxRate,3));
+
+      const impliedPremiumPct = (m.impliedTwd / m.twOpen - 1) * 100;
+      const impliedTd = document.createElement('td');
+      impliedTd.append(fmt(m.impliedTwd,0) + ' 元 ');
+      const premSpan = document.createElement('span');
+      premSpan.style.color = 'var(--critical)'; premSpan.style.fontWeight = '700';
+      premSpan.textContent = '(' + (impliedPremiumPct>=0?'+':'') + fmt(impliedPremiumPct,1) + '%)';
+      impliedTd.appendChild(premSpan);
+      tr.appendChild(impliedTd);
+
+      addTd(m.twDate);
+      addTd(fmt(m.twOpen,0)+' 元');
       tbody.appendChild(tr);
     });
   })();
