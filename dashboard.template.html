@@ -119,7 +119,7 @@
   <div class="sub" id="analog-sub">近6個月中，找出ADR收盤價與今天相近的歷史交易日，取當時對應的台股開盤價，平均後作為另一種開盤價估計</div>
   <div class="header-row">
     <div>
-      <div class="hero" id="analog-avg-price" style="font-size:36px;">--</div>
+      <div class="hero" style="font-size:36px;"><span id="analog-avg-price">--</span><span id="analog-avg-fx-note" style="color:var(--critical); font-size:15px; font-weight:700; margin-left:8px;"></span></div>
       <div class="src" id="analog-count-note"></div>
     </div>
   </div>
@@ -269,6 +269,10 @@
     const avgAdjusted = adjustedPrices.reduce((a,b) => a+b, 0) / adjustedPrices.length;
 
     document.getElementById('analog-avg-price').textContent = fmt(avgAdjusted,0) + ' 元';
+    // 台灣不實施日光節約時間，固定加8小時换算即為台灣日期，避免Intl依locale零填補月/日。
+    const fxDateTaipei = new Date(new Date(fx.quoteTime).getTime() + 8*3600*1000);
+    const fxDateLabel = fxDateTaipei.getUTCFullYear() + '年' + (fxDateTaipei.getUTCMonth()+1) + '月' + fxDateTaipei.getUTCDate() + '日';
+    document.getElementById('analog-avg-fx-note').textContent = '（' + fxDateLabel + '：匯率 ' + fmt(fx.usdTwd,3) + '）';
     document.getElementById('analog-count-note').textContent =
       '依 ' + analog.count + ' 個歷史交易日的台股開盤價，以今日匯率($'+fmt(fx.usdTwd,3)+')重新換算後取平均（ADR收盤價與今日 $' + fmt(analog.todayAdrPrice,2) + ' 相差在 ±' + fmt(analog.tolerancePct,1) + '% 內），此為每日動態重算的類比估計，非統計迴歸';
     document.getElementById('analog-sub').textContent =
@@ -324,6 +328,14 @@
       const zr = document.createElement('div'); zr.className='zr'; zr.style.color='var(--text-secondary)'; zr.textContent = range;
       c.appendChild(zh); c.appendChild(zr); container.appendChild(c);
     });
+  }
+  // 純粹依「當日收盤價」落在哪個價位帶門檻區間，跟完整分類(含RSI/ADR溢價/近高點等覆蓋條件)分開判斷，
+  // 讓框選視覺直接反映當下股價的位置，不受其他技術面因素影響。
+  function priceBandZone(price, thresholds) {
+    if (price < thresholds.cheapMax) return '便宜價';
+    if (price < thresholds.sweetMax) return '甜甜價';
+    if (price < thresholds.normalMax) return '正常';
+    return '超貴價';
   }
   // ---- 全年預估EPS估值卡（官方預估 / 個人試算 雙軌） ----
   (function(){
@@ -387,7 +399,7 @@
         const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
         d.appendChild(l); d.appendChild(v); mg.appendChild(d);
       });
-      renderZoneCards('forecast-zones-grid', result.thresholds, result.zone);
+      renderZoneCards('forecast-zones-grid', result.thresholds, priceBandZone(last.close, result.thresholds));
       document.getElementById('forecast-reasons').textContent = '目前判定依據：' + result.reasons.join('；');
       const warnEl = document.getElementById('forecast-warning');
       if (result.warning) { warnEl.textContent = '⚠️ ' + result.warning; warnEl.classList.add('show'); }
