@@ -263,14 +263,19 @@
     const card = document.getElementById('adr-analog-card');
     if (!analog || !analog.matches || !analog.matches.length) { if (card) card.style.display = 'none'; return; }
 
-    document.getElementById('analog-avg-price').textContent = fmt(analog.avgTwOpen,0) + ' 元';
+    // 用「當前匯率對應價格」(每筆歷史台股開盤價以今日匯率重新換算)取平均，而非原始歷史開盤價，
+    // 讓平均值排除匯率波動的干擾，只反映價位本身的類比。
+    const adjustedPrices = analog.matches.map((m) => (m.twOpen / m.fxRate) * fx.usdTwd);
+    const avgAdjusted = adjustedPrices.reduce((a,b) => a+b, 0) / adjustedPrices.length;
+
+    document.getElementById('analog-avg-price').textContent = fmt(avgAdjusted,0) + ' 元';
     document.getElementById('analog-count-note').textContent =
-      '依 ' + analog.count + ' 個歷史交易日的對應台股開盤價取平均（ADR收盤價與今日 $' + fmt(analog.todayAdrPrice,2) + ' 相差在 ±' + fmt(analog.tolerancePct,1) + '% 內），此為每日動態重算的類比估計，非統計迴歸';
+      '依 ' + analog.count + ' 個歷史交易日的台股開盤價，以今日匯率($'+fmt(fx.usdTwd,3)+')重新換算後取平均（ADR收盤價與今日 $' + fmt(analog.todayAdrPrice,2) + ' 相差在 ±' + fmt(analog.tolerancePct,1) + '% 內），此為每日動態重算的類比估計，非統計迴歸';
     document.getElementById('analog-sub').textContent =
-      '近6個月中，找出ADR收盤價與今天($'+fmt(analog.todayAdrPrice,2)+')相近的歷史交易日，取當時對應的台股開盤價，平均後作為另一種開盤價估計';
+      '近6個月中，找出ADR收盤價與今天($'+fmt(analog.todayAdrPrice,2)+')相近的歷史交易日，取當時對應的台股開盤價以今日匯率重新換算，平均後作為另一種開盤價估計';
 
     const tbody = document.getElementById('analog-tbody');
-    analog.matches.forEach((m) => {
+    analog.matches.forEach((m, i) => {
       const tr = document.createElement('tr');
       const addTd = (text) => { const td = document.createElement('td'); td.textContent = text; tr.appendChild(td); return td; };
       addTd(m.adrDate);
@@ -290,7 +295,7 @@
       addTd(m.twDate);
       addTd(fmt(m.twOpen,0)+' 元');
 
-      const currentFxAdjustedTwPrice = (m.twOpen / m.fxRate) * fx.usdTwd;
+      const currentFxAdjustedTwPrice = adjustedPrices[i];
       const currentFxTd = document.createElement('td');
       currentFxTd.style.color = 'var(--critical)'; currentFxTd.style.fontWeight = '700';
       currentFxTd.textContent = fmt(currentFxAdjustedTwPrice,0) + ' 元';
