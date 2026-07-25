@@ -119,7 +119,7 @@
   <div class="sub" id="analog-sub">近6個月中，找出ADR收盤價與今天相近的歷史交易日，取當時對應的台股開盤價，平均後作為另一種開盤價估計</div>
   <div class="header-row">
     <div>
-      <div class="hero" id="analog-avg-price" style="font-size:36px;">--</div>
+      <div class="hero" style="font-size:36px;"><span id="analog-avg-price">--</span><span id="analog-avg-fx-note" style="color:var(--critical); font-size:15px; font-weight:700; margin-left:8px;"></span></div>
       <div class="src" id="analog-count-note"></div>
     </div>
   </div>
@@ -269,6 +269,10 @@
     const avgAdjusted = adjustedPrices.reduce((a,b) => a+b, 0) / adjustedPrices.length;
 
     document.getElementById('analog-avg-price').textContent = fmt(avgAdjusted,0) + ' 元';
+    // 台灣不實施日光節約時間，固定加8小時换算即為台灣日期，避免Intl依locale零填補月/日。
+    const fxDateTaipei = new Date(new Date(fx.quoteTime).getTime() + 8*3600*1000);
+    const fxDateLabel = fxDateTaipei.getUTCFullYear() + '年' + (fxDateTaipei.getUTCMonth()+1) + '月' + fxDateTaipei.getUTCDate() + '日';
+    document.getElementById('analog-avg-fx-note').textContent = '（' + fxDateLabel + '：匯率 ' + fmt(fx.usdTwd,3) + '）';
     document.getElementById('analog-count-note').textContent =
       '依 ' + analog.count + ' 個歷史交易日的台股開盤價，以今日匯率($'+fmt(fx.usdTwd,3)+')重新換算後取平均（ADR收盤價與今日 $' + fmt(analog.todayAdrPrice,2) + ' 相差在 ±' + fmt(analog.tolerancePct,1) + '% 內），此為每日動態重算的類比估計，非統計迴歸';
     document.getElementById('analog-sub').textContent =
