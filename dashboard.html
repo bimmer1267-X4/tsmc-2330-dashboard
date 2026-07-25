@@ -161,12 +161,12 @@
   <div class="chart-wrap"><svg id="chart-volume" width="100%" viewBox="0 0 900 70" preserveAspectRatio="none"></svg></div>
   <div style="font-weight:600; margin:14px 0 6px;">KD(9,3,3)</div>
   <div class="legend" id="kd-legend"></div>
-  <div class="chart-wrap"><svg id="chart-kd" width="100%" viewBox="0 0 900 90" preserveAspectRatio="none"></svg></div>
+  <div class="chart-wrap"><svg id="chart-kd" width="100%" viewBox="0 0 900 90" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-kd"></div></div>
   <div style="font-weight:600; margin:14px 0 6px;">RSI(14)</div>
-  <div class="chart-wrap"><svg id="chart-rsi" width="100%" viewBox="0 0 900 90" preserveAspectRatio="none"></svg></div>
+  <div class="chart-wrap"><svg id="chart-rsi" width="100%" viewBox="0 0 900 90" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-rsi"></div></div>
   <div style="font-weight:600; margin:14px 0 6px;">MACD(12,26,9)</div>
   <div class="legend" id="macd-legend"></div>
-  <div class="chart-wrap"><svg id="chart-macd" width="100%" viewBox="0 0 900 110" preserveAspectRatio="none"></svg></div>
+  <div class="chart-wrap"><svg id="chart-macd" width="100%" viewBox="0 0 900 110" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-macd"></div></div>
 </div>
 
 <table class="sr-table" id="data-table"><caption>台積電2330近6個月每日交易數據</caption></table>
@@ -455,6 +455,40 @@
     t.textContent = text; svg.appendChild(t);
   }
 
+  // 副圖(KD/RSI/MACD)共用的滑動十字線+提示框，跟主K線圖同一套互動邏輯：滑動滑鼠可看到
+  // 對應日期與當下數值，rowsFn(i) 回傳 {date, rows:[[標籤, 數值, 顏色或null], ...]}。
+  function attachHoverTooltip(svg, tooltipEl, W, H, padT, padB, rowsFn) {
+    const hitRect = el('rect', {x:padL, y:0, width:W-padL-padR, height:H, fill:'transparent'});
+    svg.appendChild(hitRect);
+    const crosshair = el('line', {x1:0,x2:0,y1:padT,y2:H-padB, stroke:'var(--baseline)', 'stroke-width':1, visibility:'hidden'});
+    svg.appendChild(crosshair);
+    function onMove(evt) {
+      const rect = svg.getBoundingClientRect();
+      const px = (evt.clientX - rect.left) / rect.width * W;
+      let i = Math.round((px - padL) / (W - padL - padR) * (n-1));
+      i = Math.max(0, Math.min(n-1, i));
+      const cx = xScale(i,W);
+      crosshair.setAttribute('x1', cx); crosshair.setAttribute('x2', cx); crosshair.setAttribute('visibility','visible');
+      const { date, rows } = rowsFn(i);
+      tooltipEl.style.display = 'block';
+      tooltipEl.style.left = Math.min(rect.width-190, Math.max(0,(px/W)*rect.width+10)) + 'px';
+      tooltipEl.style.top = '10px';
+      tooltipEl.innerHTML = '';
+      const dateEl = document.createElement('div'); dateEl.className='t-date'; dateEl.textContent = date;
+      tooltipEl.appendChild(dateEl);
+      rows.forEach(([k,v,color])=>{
+        const row = document.createElement('div'); row.className='t-row';
+        const kEl = document.createElement('span'); kEl.className='k';
+        if (color) { const key = document.createElement('span'); key.className='tkey'; key.style.background=color; kEl.appendChild(key); }
+        const kt = document.createElement('span'); kt.textContent = k; kEl.appendChild(kt);
+        const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = v;
+        row.appendChild(kEl); row.appendChild(vEl); tooltipEl.appendChild(row);
+      });
+    }
+    svg.addEventListener('pointermove', onMove);
+    svg.addEventListener('pointerleave', () => { tooltipEl.style.display='none'; crosshair.setAttribute('visibility','hidden'); });
+  }
+
   // ---- price chart (candlestick + MA + Bollinger) ----
   (function(){
     const svg = document.getElementById('chart-price');
@@ -590,6 +624,10 @@
       const t = document.createElement('span'); t.textContent = label;
       item.appendChild(sw); item.appendChild(t); legend.appendChild(item);
     });
+    attachHoverTooltip(svg, document.getElementById('tooltip-kd'), W, H, padT, padB, (i) => ({
+      date: daily[i].date,
+      rows: [['K', fmt(ind[i].k,1), 'var(--up)'], ['D', fmt(ind[i].d,1), 'var(--down)']]
+    }));
   })();
 
   // ---- RSI ----
@@ -604,6 +642,10 @@
     let d='';
     ind.forEach((r,i)=>{ if(r.rsi14!=null){ const cmd=d?'L':'M'; d+=cmd+' '+xScale(i,W)+','+y(r.rsi14)+' '; } });
     if(d) svg.appendChild(el('path',{d,fill:'none',stroke:'var(--ma60)','stroke-width':2,'stroke-linecap':'round'}));
+    attachHoverTooltip(svg, document.getElementById('tooltip-rsi'), W, H, padT, padB, (i) => ({
+      date: daily[i].date,
+      rows: [['RSI14', fmt(ind[i].rsi14,1), 'var(--ma60)']]
+    }));
   })();
 
   // ---- MACD ----
@@ -632,6 +674,14 @@
       const t = document.createElement('span'); t.textContent = label;
       item.appendChild(sw); item.appendChild(t); legend.appendChild(item);
     });
+    attachHoverTooltip(svg, document.getElementById('tooltip-macd'), W, H, padT, padB, (i) => ({
+      date: daily[i].date,
+      rows: [
+        ['MACD', fmt(ind[i].macd,2), 'var(--ma5)'],
+        ['Signal', fmt(ind[i].signal,2), 'var(--ma60)'],
+        ['Histogram', fmt(ind[i].histogram,2), null]
+      ]
+    }));
   })();
 
   // ---- screen-reader table (accessibility: table view of underlying data) ----
