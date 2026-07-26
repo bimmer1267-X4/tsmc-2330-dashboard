@@ -1,5 +1,5 @@
 ---
-name: update-tsmc-dashboard
+name: renew-2330
 description: Manually trigger and verify a one-off refresh of the TSMC (2330) dashboard's data pipeline (bimmer1267-X4/tsmc-2330-dashboard), instead of waiting for the scheduled GitHub Actions run. Use this whenever the user asks to manually update/refresh the TSMC or 2330 dashboard right now, wants to force the data pipeline to re-run, suspects the daily automated update didn't run or is showing stale data, or asks "手動更新" / "強制更新" / "現在就更新" the dashboard.
 ---
 
