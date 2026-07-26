@@ -47,6 +47,12 @@
   .trend-summary.down .verdict { color: var(--critical); }
   .trend-summary .reasons { color: var(--text-secondary); margin-top: 4px; }
   .trend-summary .risk { color: var(--warning); margin-top: 4px; font-size: 12px; }
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000; align-items: center; justify-content: center; padding: 20px; }
+  .modal-overlay.open { display: flex; }
+  .modal-box { background: var(--surface-1); border-radius: 12px; width: 100%; max-width: 820px; height: 85vh; max-height: 820px; position: relative; box-shadow: 0 12px 40px rgba(0,0,0,0.35); overflow: hidden; }
+  .modal-close { position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); font-size: 16px; line-height: 1; cursor: pointer; z-index: 1; display: flex; align-items: center; justify-content: center; }
+  .modal-close:hover { background: var(--page); }
+  .modal-box iframe { width: 100%; height: 100%; border: none; display: block; }
   .metric-label { font-size: 12px; color: var(--muted); }
   .metric-value { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .zones-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
@@ -111,7 +117,14 @@
   <div class="sub">三大法人買賣超、融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
   <div class="trend-summary" id="market-context-summary"></div>
   <div class="metrics" id="market-context-grid"></div>
-  <div style="margin-top:12px;"><a href="chip-analysis.html" target="_blank" rel="noopener" style="font-size:13px; color:var(--up); text-decoration:none;">📊 查看AI籌碼面分析摘要 →</a></div>
+  <div style="margin-top:12px;"><a href="chip-analysis.html" id="chip-analysis-link" style="font-size:13px; color:var(--up); text-decoration:none; cursor:pointer;">📊 查看AI籌碼面分析摘要 →</a></div>
+</div>
+
+<div class="modal-overlay" id="chip-analysis-modal-overlay">
+  <div class="modal-box">
+    <button class="modal-close" id="chip-analysis-modal-close" aria-label="關閉" type="button">✕</button>
+    <iframe id="chip-analysis-modal-iframe" title="AI籌碼面分析"></iframe>
+  </div>
 </div>
 
 <div class="card" id="open-prediction-card">
@@ -850,6 +863,29 @@
       } catch (e) { /* 網路暫時失敗就跳過，下次輪詢再試 */ }
     }, 60000);
   })();
+})();
+
+// AI籌碼面分析：點連結不開新分頁，改用簡易視窗框架（iframe modal）顯示，
+// 只保留關閉功能，不做網址列/前進後退等瀏覽器導覽功能。
+(function () {
+  const link = document.getElementById('chip-analysis-link');
+  const overlay = document.getElementById('chip-analysis-modal-overlay');
+  const iframe = document.getElementById('chip-analysis-modal-iframe');
+  const closeBtn = document.getElementById('chip-analysis-modal-close');
+  if (!link || !overlay || !iframe || !closeBtn) return;
+  function openModal(e) {
+    e.preventDefault();
+    iframe.src = 'chip-analysis.html';
+    overlay.classList.add('open');
+  }
+  function closeModal() {
+    overlay.classList.remove('open');
+    iframe.src = '';
+  }
+  link.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) closeModal(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && overlay.classList.contains('open')) closeModal(); });
 })();
 
 // 若被嵌入 iframe（例如 shunshun.dev 首頁），主動回報實際內容高度給父頁面，
