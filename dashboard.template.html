@@ -39,6 +39,14 @@
   .delta.up { color: var(--good); } .delta.down { color: var(--critical); }
   .zone-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px; font-weight: 600; font-size: 14px; }
   .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin-top: 16px; }
+  .trend-summary { border-radius: 8px; padding: 10px 12px; border: 1px solid var(--border); border-left: 4px solid var(--muted); margin-top: 12px; font-size: 13px; line-height: 1.7; display: none; }
+  .trend-summary.up { border-left-color: var(--good); }
+  .trend-summary.down { border-left-color: var(--critical); }
+  .trend-summary .verdict { font-weight: 700; font-size: 14px; }
+  .trend-summary.up .verdict { color: var(--good); }
+  .trend-summary.down .verdict { color: var(--critical); }
+  .trend-summary .reasons { color: var(--text-secondary); margin-top: 4px; }
+  .trend-summary .risk { color: var(--warning); margin-top: 4px; font-size: 12px; }
   .metric-label { font-size: 12px; color: var(--muted); }
   .metric-value { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .zones-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
@@ -101,6 +109,7 @@
 <div class="card" id="market-context-card">
   <div style="font-weight:600; margin-bottom:2px;">籌碼面與大盤指數</div>
   <div class="sub">三大法人買賣超、融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
+  <div class="trend-summary" id="market-context-summary"></div>
   <div class="metrics" id="market-context-grid"></div>
 </div>
 
@@ -243,6 +252,61 @@
     });
   }
 
+  // 規則式（非AI）籌碼面趨勢摘要：把幾個方向性訊號依權重加總，避免單一指標誤判。
+  // 融資融券變化不計入方向分數（增減本身無明確多空意義，需搭配股價位置判斷），
+  // 只作為風險提示文字附加在摘要下方。
+  function computeChipTrendSummary(r) {
+    let score = 0, weightSum = 0;
+    const reasons = [];
+    const risk = [];
+
+    if (r.institutionalNet) {
+      const inet = r.institutionalNet;
+      if (inet.foreignNetLots != null) {
+        score += Math.sign(inet.foreignNetLots) * 1.5; weightSum += 1.5;
+        reasons.push('外資' + (inet.foreignNetLots>=0?'買超':'賣超') + Math.abs(inet.foreignNetLots).toLocaleString('zh-TW') + '張');
+      }
+      if (inet.trustNetLots != null) {
+        score += Math.sign(inet.trustNetLots) * 0.8; weightSum += 0.8;
+        reasons.push('投信' + (inet.trustNetLots>=0?'買超':'賣超') + Math.abs(inet.trustNetLots).toLocaleString('zh-TW') + '張');
+      }
+    }
+    if (r.optionsMarket && r.optionsMarket.putCallRatio != null) {
+      const ratio = r.optionsMarket.putCallRatio;
+      const s = ratio > 1.05 ? -1 : (ratio < 0.95 ? 1 : 0);
+      score += s; weightSum += 1;
+      reasons.push('選擇權Put/Call Ratio ' + ratio.toFixed(2) + (s>0 ? '（看多氣氛較濃）' : s<0 ? '（避險氣氛較濃）' : '（中性）'));
+    }
+    if (r.soxIndex && r.soxIndex.changePct != null) {
+      score += Math.sign(r.soxIndex.changePct) * 0.6; weightSum += 0.6;
+      reasons.push('SOX費半指數' + (r.soxIndex.changePct>=0?'上漲':'下跌') + Math.abs(r.soxIndex.changePct).toFixed(2) + '%');
+    }
+    if (r.taiexIndex && r.taiexIndex.changePct != null) {
+      score += Math.sign(r.taiexIndex.changePct) * 0.4; weightSum += 0.4;
+      reasons.push('加權指數' + (r.taiexIndex.changePct>=0?'上漲':'下跌') + Math.abs(r.taiexIndex.changePct).toFixed(2) + '%');
+    }
+    if (r.marginTrading) {
+      const mt = r.marginTrading;
+      if (mt.marginBalance != null && mt.marginBalancePrev != null) {
+        const chg = mt.marginBalance - mt.marginBalancePrev;
+        if (chg > 0) risk.push('融資餘額增加' + fmt(chg,0) + '張（槓桿部位上升，留意回檔時的斷頭賣壓）');
+        else if (chg < 0) risk.push('融資餘額減少' + fmt(Math.abs(chg),0) + '張（籌碼去化中）');
+      }
+      if (mt.shortBalance != null && mt.shortBalancePrev != null) {
+        const chg = mt.shortBalance - mt.shortBalancePrev;
+        if (chg > 0) risk.push('融券餘額增加' + fmt(chg,0) + '張（空方力道增溫，亦可能成為軋空燃料）');
+      }
+    }
+
+    if (weightSum === 0) return null;
+    const avg = score / weightSum;
+    let verdict, cls;
+    if (avg >= 0.34) { verdict = '偏多'; cls = 'up'; }
+    else if (avg <= -0.34) { verdict = '偏空'; cls = 'down'; }
+    else { verdict = '中性'; cls = ''; }
+    return { verdict, cls, reasons, risk };
+  }
+
   const adrTrappedNote = raw.adrSixMonthHighUsd!=null ? '套牢價 $'+fmt(raw.adrSixMonthHighUsd,2) : null;
   renderMetricsGrid('metrics-grid', [
     ['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)', adrTrappedNote],
@@ -255,6 +319,22 @@
   // 每個資料源都可能單獨抓取失敗（欄位為 null），逐項檢查存在才加進清單，
   // 缺的項目自然不會出現，不會顯示一排「—」。
   (function(){
+    const summaryEl = document.getElementById('market-context-summary');
+    const summary = computeChipTrendSummary(raw);
+    if (summary) {
+      summaryEl.style.display = 'block';
+      summaryEl.className = 'trend-summary' + (summary.cls ? ' ' + summary.cls : '');
+      let html = '<div class="verdict">籌碼面綜合研判：' + summary.verdict + '</div>';
+      if (summary.reasons.length) {
+        html += '<div class="reasons">' + summary.reasons.join('、') + '</div>';
+      }
+      if (summary.risk.length) {
+        html += '<div class="risk">⚠ ' + summary.risk.join('；') + '</div>';
+      }
+      html += '<div class="reasons" style="margin-top:6px; font-size:11px;">＊規則式統計摘要，非投資建議，僅供參考</div>';
+      summaryEl.innerHTML = html;
+    }
+
     const mc = [];
     if (raw.soxIndex) {
       const s = raw.soxIndex;
