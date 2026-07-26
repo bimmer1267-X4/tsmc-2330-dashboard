@@ -5,11 +5,32 @@
 
 const UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
 
+// 回推到最近一個平日（不特別排除國定假日，僅供診斷用途取得一個「大概率有資料」的日期）
+function recentTradingDate() {
+  const d = new Date();
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) {
+    d.setUTCDate(d.getUTCDate() - 1);
+  }
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}${m}${day}`;
+}
+
 const groups = [
   {
     title: "① 三大法人買賣超",
     sources: [
       { name: "TWSE OpenAPI - T86 (三大法人買賣金額統計表)", url: "https://openapi.twse.com.tw/v1/fund/T86" },
+      { name: "TWSE 舊版 rwd - 個股三大法人買賣超", url: `https://www.twse.com.tw/rwd/zh/fund/T86?date=${recentTradingDate()}&selectType=ALL&response=json` },
+    ],
+  },
+  {
+    title: "⓪ Swagger 文件探測（找出正確的資料集路徑）",
+    sources: [
+      { name: "TWSE OpenAPI - swagger.json", url: "https://openapi.twse.com.tw/v1/swagger.json" },
+      { name: "TAIFEX OpenAPI - swagger.json", url: "https://openapi.taifex.com.tw/swagger/v1/swagger.json" },
+      { name: "TAIFEX OpenAPI - swagger.json (alt)", url: "https://openapi.taifex.com.tw/v1/swagger.json" },
     ],
   },
   {
@@ -49,6 +70,8 @@ const groups = [
 ];
 
 async function probeOne(source) {
+  const isSwagger = source.url.includes("swagger");
+  const sampleLen = isSwagger ? 4000 : 500;
   try {
     const res = await fetch(source.url, { headers: { "User-Agent": UA } });
     const text = await res.text();
@@ -59,9 +82,12 @@ async function probeOne(source) {
       if (Array.isArray(json)) {
         shape = `JSON 陣列，共 ${json.length} 筆`;
         sample = JSON.stringify(json[0] ?? json.slice(0, 2), null, 2).slice(0, 500);
+      } else if (json && isSwagger && json.paths) {
+        shape = `Swagger 文件，paths 共 ${Object.keys(json.paths).length} 個`;
+        sample = Object.keys(json.paths).join("\n").slice(0, sampleLen);
       } else if (json && typeof json === "object") {
         shape = `JSON 物件，keys: ${Object.keys(json).slice(0, 10).join(", ")}`;
-        sample = JSON.stringify(json, null, 2).slice(0, 500);
+        sample = JSON.stringify(json, null, 2).slice(0, sampleLen);
       }
     } catch (e) {
       /* not JSON, keep raw sample */
