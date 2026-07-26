@@ -252,61 +252,6 @@
     });
   }
 
-  // 規則式（非AI）籌碼面趨勢摘要：把幾個方向性訊號依權重加總，避免單一指標誤判。
-  // 融資融券變化不計入方向分數（增減本身無明確多空意義，需搭配股價位置判斷），
-  // 只作為風險提示文字附加在摘要下方。
-  function computeChipTrendSummary(r) {
-    let score = 0, weightSum = 0;
-    const reasons = [];
-    const risk = [];
-
-    if (r.institutionalNet) {
-      const inet = r.institutionalNet;
-      if (inet.foreignNetLots != null) {
-        score += Math.sign(inet.foreignNetLots) * 1.5; weightSum += 1.5;
-        reasons.push('外資' + (inet.foreignNetLots>=0?'買超':'賣超') + Math.abs(inet.foreignNetLots).toLocaleString('zh-TW') + '張');
-      }
-      if (inet.trustNetLots != null) {
-        score += Math.sign(inet.trustNetLots) * 0.8; weightSum += 0.8;
-        reasons.push('投信' + (inet.trustNetLots>=0?'買超':'賣超') + Math.abs(inet.trustNetLots).toLocaleString('zh-TW') + '張');
-      }
-    }
-    if (r.optionsMarket && r.optionsMarket.putCallRatio != null) {
-      const ratio = r.optionsMarket.putCallRatio;
-      const s = ratio > 1.05 ? -1 : (ratio < 0.95 ? 1 : 0);
-      score += s; weightSum += 1;
-      reasons.push('選擇權Put/Call Ratio ' + ratio.toFixed(2) + (s>0 ? '（看多氣氛較濃）' : s<0 ? '（避險氣氛較濃）' : '（中性）'));
-    }
-    if (r.soxIndex && r.soxIndex.changePct != null) {
-      score += Math.sign(r.soxIndex.changePct) * 0.6; weightSum += 0.6;
-      reasons.push('SOX費半指數' + (r.soxIndex.changePct>=0?'上漲':'下跌') + Math.abs(r.soxIndex.changePct).toFixed(2) + '%');
-    }
-    if (r.taiexIndex && r.taiexIndex.changePct != null) {
-      score += Math.sign(r.taiexIndex.changePct) * 0.4; weightSum += 0.4;
-      reasons.push('加權指數' + (r.taiexIndex.changePct>=0?'上漲':'下跌') + Math.abs(r.taiexIndex.changePct).toFixed(2) + '%');
-    }
-    if (r.marginTrading) {
-      const mt = r.marginTrading;
-      if (mt.marginBalance != null && mt.marginBalancePrev != null) {
-        const chg = mt.marginBalance - mt.marginBalancePrev;
-        if (chg > 0) risk.push('融資餘額增加' + fmt(chg,0) + '張（槓桿部位上升，留意回檔時的斷頭賣壓）');
-        else if (chg < 0) risk.push('融資餘額減少' + fmt(Math.abs(chg),0) + '張（籌碼去化中）');
-      }
-      if (mt.shortBalance != null && mt.shortBalancePrev != null) {
-        const chg = mt.shortBalance - mt.shortBalancePrev;
-        if (chg > 0) risk.push('融券餘額增加' + fmt(chg,0) + '張（空方力道增溫，亦可能成為軋空燃料）');
-      }
-    }
-
-    if (weightSum === 0) return null;
-    const avg = score / weightSum;
-    let verdict, cls;
-    if (avg >= 0.34) { verdict = '偏多'; cls = 'up'; }
-    else if (avg <= -0.34) { verdict = '偏空'; cls = 'down'; }
-    else { verdict = '中性'; cls = ''; }
-    return { verdict, cls, reasons, risk };
-  }
-
   const adrTrappedNote = raw.adrSixMonthHighUsd!=null ? '套牢價 $'+fmt(raw.adrSixMonthHighUsd,2) : null;
   renderMetricsGrid('metrics-grid', [
     ['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)', adrTrappedNote],
@@ -320,7 +265,7 @@
   // 缺的項目自然不會出現，不會顯示一排「—」。
   (function(){
     const summaryEl = document.getElementById('market-context-summary');
-    const summary = computeChipTrendSummary(raw);
+    const summary = raw.chipTrend;
     if (summary) {
       summaryEl.style.display = 'block';
       summaryEl.className = 'trend-summary' + (summary.cls ? ' ' + summary.cls : '');

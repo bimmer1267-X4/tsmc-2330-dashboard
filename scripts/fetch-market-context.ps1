@@ -5,6 +5,7 @@
     - institutionalNet：三大法人（外資/投信/合計）買賣超 (TWSE 舊版 rwd/zh/fund/T86)
     - exDividend：近期除權息預告 (TWSE OpenAPI TWT48U_ALL)
     - optionsMarket：台指選擇權(TXO)未平倉 Put/Call Ratio (TAIFEX OpenAPI)
+    - chipTrend：規則式（非AI）籌碼面趨勢判讀（偏多/中性/偏空 + 理由），根據以上欄位加權計分
   每段資料來源獨立 try/catch，單一來源失敗不影響其他欄位，邏輯與
   fetch-market-context.mjs 對等。
 #>
@@ -134,6 +135,61 @@ function Get-OptionsMarket {
     return [PSCustomObject]@{ date = $isoDate; callOI = $callOI; putOI = $putOI; putCallRatio = $ratio }
 }
 
+function Get-ChipTrend($Raw) {
+    $score = 0.0; $weightSum = 0.0
+    $reasons = @()
+    $risk = @()
+
+    if ($Raw.institutionalNet) {
+        $inet = $Raw.institutionalNet
+        if ($null -ne $inet.foreignNetLots) {
+            $score += [math]::Sign($inet.foreignNetLots) * 1.5; $weightSum += 1.5
+            $dir = if ($inet.foreignNetLots -ge 0) { "買超" } else { "賣超" }
+            $reasons += "外資$dir$([math]::Abs($inet.foreignNetLots).ToString('N0'))張"
+        }
+        if ($null -ne $inet.trustNetLots) {
+            $score += [math]::Sign($inet.trustNetLots) * 0.8; $weightSum += 0.8
+            $dir = if ($inet.trustNetLots -ge 0) { "買超" } else { "賣超" }
+            $reasons += "投信$dir$([math]::Abs($inet.trustNetLots).ToString('N0'))張"
+        }
+    }
+    if ($Raw.optionsMarket -and $null -ne $Raw.optionsMarket.putCallRatio) {
+        $ratio = $Raw.optionsMarket.putCallRatio
+        $s = if ($ratio -gt 1.05) { -1 } elseif ($ratio -lt 0.95) { 1 } else { 0 }
+        $score += $s; $weightSum += 1
+        $note = if ($s -gt 0) { "（看多氣氛較濃）" } elseif ($s -lt 0) { "（避險氣氛較濃）" } else { "（中性）" }
+        $reasons += "選擇權Put/Call Ratio $($ratio.ToString('F2'))$note"
+    }
+    if ($Raw.soxIndex -and $null -ne $Raw.soxIndex.changePct) {
+        $score += [math]::Sign($Raw.soxIndex.changePct) * 0.6; $weightSum += 0.6
+        $dir = if ($Raw.soxIndex.changePct -ge 0) { "上漲" } else { "下跌" }
+        $reasons += "SOX費半指數$dir$([math]::Abs($Raw.soxIndex.changePct).ToString('F2'))%"
+    }
+    if ($Raw.taiexIndex -and $null -ne $Raw.taiexIndex.changePct) {
+        $score += [math]::Sign($Raw.taiexIndex.changePct) * 0.4; $weightSum += 0.4
+        $dir = if ($Raw.taiexIndex.changePct -ge 0) { "上漲" } else { "下跌" }
+        $reasons += "加權指數$dir$([math]::Abs($Raw.taiexIndex.changePct).ToString('F2'))%"
+    }
+    if ($Raw.marginTrading) {
+        $mt = $Raw.marginTrading
+        if ($null -ne $mt.marginBalance -and $null -ne $mt.marginBalancePrev) {
+            $chg = $mt.marginBalance - $mt.marginBalancePrev
+            if ($chg -gt 0) { $risk += "融資餘額增加$($chg.ToString('N0'))張（槓桿部位上升，留意回檔時的斷頭賣壓）" }
+            elseif ($chg -lt 0) { $risk += "融資餘額減少$([math]::Abs($chg).ToString('N0'))張（籌碼去化中）" }
+        }
+        if ($null -ne $mt.shortBalance -and $null -ne $mt.shortBalancePrev) {
+            $chg = $mt.shortBalance - $mt.shortBalancePrev
+            if ($chg -gt 0) { $risk += "融券餘額增加$($chg.ToString('N0'))張（空方力道增溫，亦可能成為軋空燃料）" }
+        }
+    }
+
+    if ($weightSum -eq 0) { return $null }
+    $avg = $score / $weightSum
+    $verdict = if ($avg -ge 0.34) { "偏多" } elseif ($avg -le -0.34) { "偏空" } else { "中性" }
+    $cls = if ($avg -ge 0.34) { "up" } elseif ($avg -le -0.34) { "down" } else { "" }
+    return [PSCustomObject]@{ verdict = $verdict; cls = $cls; reasons = $reasons; risk = $risk }
+}
+
 function Invoke-Safe($label, [scriptblock]$fn) {
     try { return & $fn }
     catch {
@@ -150,6 +206,7 @@ $raw | Add-Member -MemberType NoteProperty -Name "taiexIndex" -Value (Invoke-Saf
 $raw | Add-Member -MemberType NoteProperty -Name "institutionalNet" -Value (Invoke-Safe "三大法人買賣超" { Get-InstitutionalNet $raw.daily }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "exDividend" -Value (Invoke-Safe "除權息預告" { Get-ExDividend }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "optionsMarket" -Value (Invoke-Safe "選擇權未平倉" { Get-OptionsMarket }) -Force
+$raw | Add-Member -MemberType NoteProperty -Name "chipTrend" -Value (Invoke-Safe "籌碼面趨勢判讀" { Get-ChipTrend $raw }) -Force
 
 $raw | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $DataPath -Encoding utf8
-Write-Host "已更新 marginTrading / soxIndex / taiexIndex / institutionalNet / exDividend / optionsMarket"
+Write-Host "已更新 marginTrading / soxIndex / taiexIndex / institutionalNet / exDividend / optionsMarket / chipTrend"

@@ -4,6 +4,7 @@
 //   - institutionalNet：三大法人（外資/投信/合計）買賣超 (TWSE 舊版 rwd/zh/fund/T86)
 //   - exDividend：近期除權息預告 (TWSE OpenAPI TWT48U_ALL)
 //   - optionsMarket：台指選擇權(TXO)未平倉 Put/Call Ratio (TAIFEX OpenAPI)
+//   - chipTrend：規則式（非AI）籌碼面趨勢判讀（偏多/中性/偏空 + 理由），根據以上欄位加權計分
 // 每一段資料來源獨立 try/catch，單一來源失敗不影響其他欄位（沿用 merge-and-classify.mjs
 // 一貫的容錯風格），失敗時該欄位維持 null，前端會顯示「暫無資料」而不是整頁壞掉。
 // 跨平台版本 (Node.js >= 18)，邏輯與 fetch-market-context.ps1 對等。
@@ -137,6 +138,62 @@ async function fetchOptionsMarket() {
   };
 }
 
+// 規則式（非AI）籌碼面趨勢判讀：把幾個方向性訊號依權重加總算分，避免單一指標誤判。
+// 在資料抓取當下（而非瀏覽器端）就完成分類，做法比照 merge-and-classify.mjs 對
+// Trailing/Forward PE 的估值分區判讀——分析結果是資料管線的一部分、可重現，不是
+// 每次開頁面才臨時算的展示邏輯。
+// 融資融券變化不計入方向分數（增減本身無明確多空意義，需搭配股價位置判斷），
+// 只作為風險提示文字附加在摘要下方。
+function classifyChipTrend(raw) {
+  let score = 0, weightSum = 0;
+  const reasons = [];
+  const risk = [];
+
+  if (raw.institutionalNet) {
+    const inet = raw.institutionalNet;
+    if (inet.foreignNetLots != null) {
+      score += Math.sign(inet.foreignNetLots) * 1.5; weightSum += 1.5;
+      reasons.push(`外資${inet.foreignNetLots >= 0 ? "買超" : "賣超"}${Math.abs(inet.foreignNetLots).toLocaleString("zh-TW")}張`);
+    }
+    if (inet.trustNetLots != null) {
+      score += Math.sign(inet.trustNetLots) * 0.8; weightSum += 0.8;
+      reasons.push(`投信${inet.trustNetLots >= 0 ? "買超" : "賣超"}${Math.abs(inet.trustNetLots).toLocaleString("zh-TW")}張`);
+    }
+  }
+  if (raw.optionsMarket && raw.optionsMarket.putCallRatio != null) {
+    const ratio = raw.optionsMarket.putCallRatio;
+    const s = ratio > 1.05 ? -1 : ratio < 0.95 ? 1 : 0;
+    score += s; weightSum += 1;
+    reasons.push(`選擇權Put/Call Ratio ${ratio.toFixed(2)}${s > 0 ? "（看多氣氛較濃）" : s < 0 ? "（避險氣氛較濃）" : "（中性）"}`);
+  }
+  if (raw.soxIndex && raw.soxIndex.changePct != null) {
+    score += Math.sign(raw.soxIndex.changePct) * 0.6; weightSum += 0.6;
+    reasons.push(`SOX費半指數${raw.soxIndex.changePct >= 0 ? "上漲" : "下跌"}${Math.abs(raw.soxIndex.changePct).toFixed(2)}%`);
+  }
+  if (raw.taiexIndex && raw.taiexIndex.changePct != null) {
+    score += Math.sign(raw.taiexIndex.changePct) * 0.4; weightSum += 0.4;
+    reasons.push(`加權指數${raw.taiexIndex.changePct >= 0 ? "上漲" : "下跌"}${Math.abs(raw.taiexIndex.changePct).toFixed(2)}%`);
+  }
+  if (raw.marginTrading) {
+    const mt = raw.marginTrading;
+    if (mt.marginBalance != null && mt.marginBalancePrev != null) {
+      const chg = mt.marginBalance - mt.marginBalancePrev;
+      if (chg > 0) risk.push(`融資餘額增加${chg.toLocaleString("zh-TW")}張（槓桿部位上升，留意回檔時的斷頭賣壓）`);
+      else if (chg < 0) risk.push(`融資餘額減少${Math.abs(chg).toLocaleString("zh-TW")}張（籌碼去化中）`);
+    }
+    if (mt.shortBalance != null && mt.shortBalancePrev != null) {
+      const chg = mt.shortBalance - mt.shortBalancePrev;
+      if (chg > 0) risk.push(`融券餘額增加${chg.toLocaleString("zh-TW")}張（空方力道增溫，亦可能成為軋空燃料）`);
+    }
+  }
+
+  if (weightSum === 0) return null;
+  const avg = score / weightSum;
+  const verdict = avg >= 0.34 ? "偏多" : avg <= -0.34 ? "偏空" : "中性";
+  const cls = avg >= 0.34 ? "up" : avg <= -0.34 ? "down" : "";
+  return { verdict, cls, reasons, risk };
+}
+
 async function safe(label, fn) {
   try {
     return await fn();
@@ -155,9 +212,10 @@ async function main() {
   raw.institutionalNet = await safe("三大法人買賣超", () => fetchInstitutionalNet(raw.daily));
   raw.exDividend = await safe("除權息預告", fetchExDividend);
   raw.optionsMarket = await safe("選擇權未平倉", fetchOptionsMarket);
+  raw.chipTrend = await safe("籌碼面趨勢判讀", () => classifyChipTrend(raw));
 
   await writeFile(DATA_PATH, JSON.stringify(raw), "utf8");
-  console.log("已更新 marginTrading / soxIndex / taiexIndex / institutionalNet / exDividend / optionsMarket");
+  console.log("已更新 marginTrading / soxIndex / taiexIndex / institutionalNet / exDividend / optionsMarket / chipTrend");
 }
 
 main().catch((e) => {
