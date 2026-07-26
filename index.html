@@ -47,9 +47,17 @@
   .trend-summary.down .verdict { color: var(--critical); }
   .trend-summary .reasons { color: var(--text-secondary); margin-top: 4px; }
   .trend-summary .risk { color: var(--warning); margin-top: 4px; font-size: 12px; }
-  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000; align-items: center; justify-content: center; padding: 20px; }
-  .modal-overlay.open { display: flex; }
-  .modal-box { background: var(--surface-1); border-radius: 12px; width: 100%; max-width: 820px; height: 85vh; max-height: 820px; position: relative; box-shadow: 0 12px 40px rgba(0,0,0,0.35); overflow: hidden; }
+  /* 用 position:fixed 當背景遮罩沒問題（在任何情況下都能蓋住目前可視範圍），
+     但 .modal-box 改用 position:absolute（文件座標）而非 fixed+置中：
+     這個頁面常被 shunshun.dev 用「不能內部捲動、高度=內容全長」的方式嵌成
+     iframe，此時 iframe 自己的「viewport」等於整份文件的高度，若用
+     fixed+置中，彈窗會被置中在「整份文件」的中間，而不是使用者目前實際
+     捲動到、看得到的那一小段畫面，導致彈窗跳出來的位置在很下面要另外
+     捲動才看得到。改成 absolute 並由 JS 在開啟當下定位到觸發連結所在的
+     文件座標，就能保證彈窗一定出現在使用者剛剛點擊、當下看得到的位置。 */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000; }
+  .modal-overlay.open { display: block; }
+  .modal-box { background: var(--surface-1); border-radius: 12px; width: calc(100% - 40px); max-width: 820px; height: 480px; max-height: 80vh; position: absolute; left: 50%; transform: translateX(-50%); box-shadow: 0 12px 40px rgba(0,0,0,0.35); overflow: hidden; }
   .modal-close { position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); font-size: 16px; line-height: 1; cursor: pointer; z-index: 1; display: flex; align-items: center; justify-content: center; }
   .modal-close:hover { background: var(--page); }
   .modal-box iframe { width: 100%; height: 100%; border: none; display: block; }
@@ -124,7 +132,7 @@
 </div>
 
 <div class="modal-overlay" id="chip-analysis-modal-overlay">
-  <div class="modal-box">
+  <div class="modal-box" id="chip-analysis-modal-box">
     <button class="modal-close" id="chip-analysis-modal-close" aria-label="關閉" type="button">✕</button>
     <iframe id="chip-analysis-modal-iframe" title="AI籌碼面分析"></iframe>
   </div>
@@ -875,12 +883,18 @@
 (function () {
   const link = document.getElementById('chip-analysis-link');
   const overlay = document.getElementById('chip-analysis-modal-overlay');
+  const box = document.getElementById('chip-analysis-modal-box');
   const iframe = document.getElementById('chip-analysis-modal-iframe');
   const closeBtn = document.getElementById('chip-analysis-modal-close');
-  if (!link || !overlay || !iframe || !closeBtn) return;
+  if (!link || !overlay || !box || !iframe || !closeBtn) return;
   function openModal(e) {
     e.preventDefault();
     iframe.src = 'chip-analysis.html';
+    // 定位到連結目前在文件中的位置，確保彈窗一定出現在使用者當下看得到的地方
+    // （不能單純用 CSS 置中，被嵌成不能內部捲動的高度自適應 iframe 時置中基準
+    // 會是整份文件而不是目前可視範圍，見上方 CSS 註解）
+    const linkTop = link.getBoundingClientRect().top + (window.scrollY || window.pageYOffset || 0);
+    box.style.top = Math.max(16, linkTop - 30) + 'px';
     overlay.classList.add('open');
   }
   function closeModal() {
