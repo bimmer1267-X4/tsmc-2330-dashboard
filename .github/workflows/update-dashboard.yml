@@ -31,6 +31,9 @@ jobs:
       - name: Merge ADR/FX + classify valuation zone
         run: node scripts/merge-and-classify.mjs
 
+      - name: Fetch margin trading / SOX+TAIEX / ex-dividend / options open interest
+        run: node scripts/fetch-market-context.mjs
+
       - name: Build dashboard.html
         run: node scripts/build.mjs
 
