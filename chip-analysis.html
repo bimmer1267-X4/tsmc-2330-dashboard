@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>台積電(2330) AI籌碼面分析</title>
+<style>
+  :root {
+    --surface-1: #fcfcfb; --page: #f9f9f7; --text-primary: #0b0b0b; --text-secondary: #52514e;
+    --muted: #898781; --border: rgba(11,11,11,0.10);
+    --up: #2a78d6; --down: #e34948;
+    --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    --card-shadow: 0 1px 2px rgba(11,11,11,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff; --text-secondary: #c3c2b7;
+      --muted: #898781; --border: rgba(255,255,255,0.10);
+      --up: #3987e5; --down: #e66767;
+      --good: #0ca30c; --warning: #c98500; --critical: #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff; --text-secondary: #c3c2b7;
+    --muted: #898781; --border: rgba(255,255,255,0.10);
+    --up: #3987e5; --down: #e66767;
+    --good: #0ca30c; --warning: #c98500; --critical: #e66767;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 20px; max-width: 760px; margin-inline: auto;
+  }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; box-shadow: var(--card-shadow); margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  .sub { color: var(--text-secondary); font-size: 13px; margin-bottom: 16px; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--warning); color: #1a1200; margin-bottom: 12px; }
+  .analysis-body { font-size: 15px; line-height: 1.9; white-space: pre-wrap; }
+  .placeholder { color: var(--text-secondary); font-size: 14px; }
+  .back-link { display: inline-block; margin-top: 20px; font-size: 13px; color: var(--up); text-decoration: none; }
+  .back-link:hover { text-decoration: underline; }
+  .disclaimer { color: var(--muted); font-size: 11px; margin-top: 16px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>台積電(2330) AI籌碼面分析</h1>
+    <div class="sub">最後更新時間：<span id="updated-at">尚未生成</span>（台灣時間）</div>
+    <div class="analysis-body placeholder">
+      這份分析尚未產生。系統會在每個台北時間週二至週六早上07:00自動更新（涵蓋台股全部5個交易日的開盤前準備，週六的分析會涵蓋到下週一），請稍候下一次排程執行後回來查看。
+    </div>
+    <div class="disclaimer">＊本頁內容為AI依當日籌碼面與大盤指數數據生成之敘事分析，僅供參考，不構成投資建議。</div>
+    <a class="back-link" href="./">← 返回儀表板</a>
+  </div>
+</body>
+</html>
