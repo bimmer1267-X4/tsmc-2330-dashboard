@@ -182,13 +182,18 @@
   const raw = JSON.parse(document.getElementById('dashboard-data').textContent);
   const daily = raw.daily, ind = raw.indicators, adr = raw.adr, fx = raw.fxRate;
   const n = daily.length;
-  const last = daily[n-1], prevClose = daily[n-2] ? daily[n-2].close : last.close;
+  const last = daily[n-1];
 
   function fmt(v, d) { return v == null ? '—' : Number(v).toLocaleString('zh-TW', {minimumFractionDigits:d||0, maximumFractionDigits:d||0}); }
 
   // 渲染最上方大字股價。若 liveQuote 存在且日期比 daily 陣列最後一天新（代表當天盤中、
   // 隔夜完整重算還沒跑），就改用盤中即時報價，漲跌幅改以「昨收」（daily 最後一天）為基準；
   // 否則沿用每日收盤資料。獨立成函式是因為盤中輪詢（見檔案底部）會用新抓到的資料重新呼叫它。
+  //
+  // 「盤中即時」標籤只在報價還新鮮（15分鐘內）時顯示：liveQuote 只在交易日09:00-14:00
+  // 每5分鐘更新一次，收盤後到隔天完整重算前，data.json 裡的 liveQuote 會停在最後一次
+  // 盤中抓到的時間，如果不管新鮮度一律標「即時」，半夜打開頁面也會看到「盤中即時 13:55」，
+  // 價格本身沒錯（就是那天收盤前最後成交價），但「即時」這個字眼在收盤後就不誠實了。
   function renderHero(r) {
     const d = r.daily, m = d.length;
     const lastBar = d[m-1];
@@ -196,7 +201,10 @@
     if (r.liveQuote && r.liveQuote.date && r.liveQuote.date !== lastBar.date && r.liveQuote.price != null) {
       heroPrice = r.liveQuote.price;
       heroPrevClose = lastBar.close;
-      liveNote = ' · 盤中即時 ' + (r.liveQuote.time || '');
+      const quoteInstant = new Date(r.liveQuote.date + 'T' + (r.liveQuote.time || '00:00:00') + '+08:00');
+      const ageMs = Date.now() - quoteInstant.getTime();
+      const isFresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs < 15 * 60 * 1000;
+      liveNote = isFresh ? (' · 盤中即時 ' + (r.liveQuote.time || '')) : '';
     }
     const chg = heroPrice - heroPrevClose, chgPct = (chg/heroPrevClose*100).toFixed(2);
     document.getElementById('hero-price').textContent = fmt(heroPrice,0);
@@ -727,9 +735,22 @@
   // 盤中輪詢：每分鐘重新抓一次 data.json，若 liveQuote 或 generatedAt 有變化就重新渲染
   // 最上方的股價（其餘圖表/指標維持每日收盤後才更新，不受此輪詢影響）。這樣頁面開著的
   // 時候就會自動反映盤中每5分鐘一次的即時報價更新，不用手動重新整理。
+  //
+  // liveQuote 只有交易日 09:00-14:00 才會變動，這段時間外資料不會變，輪詢也就沒有意義，
+  // 所以每次觸發前先檢查現在是不是台北時間的交易時段（留5分鐘緩衝），不是的話直接跳過
+  // 這次 fetch，避免頁面開著過夜、跨週末時做白工。
+  function isTradingWindowTaipei() {
+    const taipei = new Date(Date.now() + 8 * 3600 * 1000);
+    const day = taipei.getUTCDay(); // 以位移後的 UTC 欄位讀取，代表台北時間的星期幾
+    if (day === 0 || day === 6) return false;
+    const mins = taipei.getUTCHours() * 60 + taipei.getUTCMinutes();
+    return mins >= (9 * 60 - 5) && mins <= (14 * 60 + 5);
+  }
+
   (function () {
     let lastSeenAt = raw.generatedAt, lastSeenQuote = JSON.stringify(raw.liveQuote || null);
     setInterval(async () => {
+      if (!isTradingWindowTaipei()) return;
       try {
         const res = await fetch('data/data.json', { cache: 'no-store' });
         if (!res.ok) return;
