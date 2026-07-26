@@ -98,6 +98,12 @@
   <div class="metrics" id="metrics-grid"></div>
 </div>
 
+<div class="card" id="market-context-card">
+  <div style="font-weight:600; margin-bottom:2px;">籌碼面與大盤指數</div>
+  <div class="sub">融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
+  <div class="metrics" id="market-context-grid"></div>
+</div>
+
 <div class="card" id="open-prediction-card">
   <div style="font-weight:600; margin-bottom:2px;">今日台股開盤價機率預估</div>
   <div class="sub">依近6個月「ADR隔夜漲跌% → 台股開盤缺口%」歷史迴歸模型，套用今天的ADR變動推估</div>
@@ -218,27 +224,69 @@
   const sixMonthHighClose = Math.max(...daily.map((d) => d.close));
   document.getElementById('trapped-price').textContent = fmt(sixMonthHighClose,0) + ' 元';
 
+  // 通用「指標小格」渲染：label + value + 選填的紅字提示（例如套牢價）。
+  // metrics-grid（ADR/匯率）與 market-context-grid（籌碼面/大盤指數）共用同一套渲染邏輯。
+  function renderMetricsGrid(gridId, metrics) {
+    const mg = document.getElementById(gridId);
+    metrics.forEach(([label, value, note]) => {
+      const d = document.createElement('div');
+      const l = document.createElement('div'); l.className='metric-label'; l.textContent = label;
+      const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
+      d.appendChild(l); d.appendChild(v);
+      if (note) {
+        const noteEl = document.createElement('div');
+        noteEl.style.color = 'var(--critical)'; noteEl.style.fontSize = '12px'; noteEl.style.fontWeight = '700'; noteEl.style.marginTop = '2px';
+        noteEl.textContent = note;
+        d.appendChild(noteEl);
+      }
+      mg.appendChild(d);
+    });
+  }
+
   const adrTrappedNote = raw.adrSixMonthHighUsd!=null ? '套牢價 $'+fmt(raw.adrSixMonthHighUsd,2) : null;
-  const metrics = [
+  renderMetricsGrid('metrics-grid', [
     ['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)', adrTrappedNote],
     ['ADR換算台股價', fmt(raw.adrImpliedTwd,0)+' 元'],
     ['ADR溢價', (raw.adrPremiumPct>=0?'+':'')+raw.adrPremiumPct+'%'],
     ['USD/TWD', fmt(fx.usdTwd,3)]
-  ];
-  const mg = document.getElementById('metrics-grid');
-  metrics.forEach(([label, value, note]) => {
-    const d = document.createElement('div');
-    const l = document.createElement('div'); l.className='metric-label'; l.textContent = label;
-    const v = document.createElement('div'); v.className='metric-value'; v.textContent = value;
-    d.appendChild(l); d.appendChild(v);
-    if (note) {
-      const noteEl = document.createElement('div');
-      noteEl.style.color = 'var(--critical)'; noteEl.style.fontSize = '12px'; noteEl.style.fontWeight = '700'; noteEl.style.marginTop = '2px';
-      noteEl.textContent = note;
-      d.appendChild(noteEl);
+  ]);
+
+  // ---- 籌碼面與大盤指數（股市經理人視角補充參考資訊）----
+  // 每個資料源都可能單獨抓取失敗（欄位為 null），逐項檢查存在才加進清單，
+  // 缺的項目自然不會出現，不會顯示一排「—」。
+  (function(){
+    const mc = [];
+    if (raw.soxIndex) {
+      const s = raw.soxIndex;
+      mc.push(['費城半導體指數(SOX)', fmt(s.price,2)+' ('+(s.changePct>=0?'+':'')+fmt(s.changePct,2)+'%)']);
     }
-    mg.appendChild(d);
-  });
+    if (raw.taiexIndex) {
+      const t = raw.taiexIndex;
+      mc.push(['加權指數(TAIEX)', fmt(t.price,0)+' ('+(t.changePct>=0?'+':'')+fmt(t.changePct,2)+'%)']);
+    }
+    if (raw.marginTrading) {
+      const mt = raw.marginTrading;
+      if (mt.marginBalance != null) {
+        const chg = mt.marginBalancePrev != null ? mt.marginBalance - mt.marginBalancePrev : null;
+        mc.push(['融資餘額', fmt(mt.marginBalance,0)+' 張' + (chg!=null ? ' ('+(chg>=0?'+':'')+fmt(chg,0)+')' : '')]);
+      }
+      if (mt.shortBalance != null) {
+        const chg = mt.shortBalancePrev != null ? mt.shortBalance - mt.shortBalancePrev : null;
+        mc.push(['融券餘額', fmt(mt.shortBalance,0)+' 張' + (chg!=null ? ' ('+(chg>=0?'+':'')+fmt(chg,0)+')' : '')]);
+      }
+    }
+    if (raw.optionsMarket && raw.optionsMarket.putCallRatio != null) {
+      mc.push(['選擇權 Put/Call Ratio', fmt(raw.optionsMarket.putCallRatio,2)]);
+    }
+    if (raw.exDividend && raw.exDividend.date) {
+      const ed = raw.exDividend;
+      const detail = ed.cashDividend ? '（現金股利 '+fmt(ed.cashDividend,2)+' 元）' : '';
+      mc.push(['近期除權息', ed.date + detail]);
+    } else {
+      mc.push(['近期除權息', '近期無安排']);
+    }
+    renderMetricsGrid('market-context-grid', mc);
+  })();
 
   // ---- 今日台股開盤價機率預估 ----
   (function(){
