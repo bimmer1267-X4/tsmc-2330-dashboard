@@ -83,7 +83,7 @@
 </style>
 
 <div class="card">
-  <h1>台積電 2330 買賣評估儀表板</h1>
+  <h1>台積電 2330 股價儀表板</h1>
   <div class="sub">資料更新時間：<span id="updated-at">--</span>（台灣時間）｜資料來源：TWSE 台灣證券交易所（股價/本益比/EPS）、stockanalysis.com＋Yahoo Finance 交叉比對（ADR）、Yahoo股市（匯率）</div>
   <div class="header-row">
     <div>
@@ -100,7 +100,7 @@
 
 <div class="card" id="market-context-card">
   <div style="font-weight:600; margin-bottom:2px;">籌碼面與大盤指數</div>
-  <div class="sub">融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
+  <div class="sub">三大法人買賣超、融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
   <div class="metrics" id="market-context-grid"></div>
 </div>
 
@@ -263,6 +263,18 @@
     if (raw.taiexIndex) {
       const t = raw.taiexIndex;
       mc.push(['加權指數(TAIEX)', fmt(t.price,0)+' ('+(t.changePct>=0?'+':'')+fmt(t.changePct,2)+'%)']);
+    }
+    if (raw.institutionalNet) {
+      const inet = raw.institutionalNet;
+      if (inet.foreignNetLots != null) {
+        mc.push(['外資買賣超', (inet.foreignNetLots>=0?'+':'') + fmt(inet.foreignNetLots,0) + ' 張']);
+      }
+      if (inet.trustNetLots != null) {
+        mc.push(['投信買賣超', (inet.trustNetLots>=0?'+':'') + fmt(inet.trustNetLots,0) + ' 張']);
+      }
+      if (inet.totalNetLots != null) {
+        mc.push(['三大法人合計買賣超', (inet.totalNetLots>=0?'+':'') + fmt(inet.totalNetLots,0) + ' 張']);
+      }
     }
     if (raw.marginTrading) {
       const mt = raw.marginTrading;

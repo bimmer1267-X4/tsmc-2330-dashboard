@@ -1,6 +1,7 @@
 // 抓取「股市經理人視角」的補充參考資訊，合併進 data/data.json：
 //   - marginTrading：台積電(2330)融資融券餘額 (TWSE OpenAPI MI_MARGN)
 //   - soxIndex / taiexIndex：費城半導體指數(SOX)、加權指數(TAIEX) (Yahoo Finance)
+//   - institutionalNet：三大法人（外資/投信/合計）買賣超 (TWSE 舊版 rwd/zh/fund/T86)
 //   - exDividend：近期除權息預告 (TWSE OpenAPI TWT48U_ALL)
 //   - optionsMarket：台指選擇權(TXO)未平倉 Put/Call Ratio (TAIFEX OpenAPI)
 // 每一段資料來源獨立 try/catch，單一來源失敗不影響其他欄位（沿用 merge-and-classify.mjs
@@ -70,6 +71,35 @@ async function fetchYahooIndex(symbol) {
   return { price, changePct, quoteTime };
 }
 
+// 三大法人買賣超（個股）。OpenAPI /v1/fund/T86 回傳的是 HTML 錯誤頁（路徑錯誤），
+// 改用與 STOCK_DAY / BWIBBU_d 相同風格的舊版 rwd 端點，且比照 fetchValuation 的作法，
+// 從最新交易日往前回溯最多 5 個交易日（避免當天報表尚未發布時整項掛空）。
+async function fetchInstitutionalNet(daily) {
+  for (let back = 0; back < 5; back++) {
+    const idx = daily.length - 1 - back;
+    if (idx < 0) break;
+    const tryDate = daily[idx].date.replace(/-/g, "");
+    const url = `https://www.twse.com.tw/rwd/zh/fund/T86?date=${tryDate}&selectType=ALL&response=json`;
+    const resp = await fetchJson(url);
+    if (resp.stat === "OK" && Array.isArray(resp.data)) {
+      const row = resp.data.find((r) => r[0] === STOCK_NO);
+      if (row) {
+        const foreignNet = (toNum(row[4]) ?? 0) + (toNum(row[7]) ?? 0);
+        const trustNet = toNum(row[10]);
+        const totalNet = toNum(row[18]);
+        return {
+          date: daily[idx].date,
+          foreignNetLots: Math.round(foreignNet / 1000),
+          trustNetLots: trustNet != null ? Math.round(trustNet / 1000) : null,
+          totalNetLots: totalNet != null ? Math.round(totalNet / 1000) : null,
+        };
+      }
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  throw new Error("T86 回溯5個交易日仍查無2330資料");
+}
+
 // 除權息預告（篩選單一個股，取最近一筆；通常一次只有 0-1 筆，多筆的話取最早的日期）
 async function fetchExDividend() {
   const rows = await fetchJson("https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL");
@@ -122,11 +152,12 @@ async function main() {
   raw.marginTrading = await safe("融資融券餘額", fetchMarginTrading);
   raw.soxIndex = await safe("SOX指數", () => fetchYahooIndex("^SOX"));
   raw.taiexIndex = await safe("TAIEX指數", () => fetchYahooIndex("^TWII"));
+  raw.institutionalNet = await safe("三大法人買賣超", () => fetchInstitutionalNet(raw.daily));
   raw.exDividend = await safe("除權息預告", fetchExDividend);
   raw.optionsMarket = await safe("選擇權未平倉", fetchOptionsMarket);
 
   await writeFile(DATA_PATH, JSON.stringify(raw), "utf8");
-  console.log("已更新 marginTrading / soxIndex / taiexIndex / exDividend / optionsMarket");
+  console.log("已更新 marginTrading / soxIndex / taiexIndex / institutionalNet / exDividend / optionsMarket");
 }
 
 main().catch((e) => {

@@ -2,6 +2,7 @@
   抓取「股市經理人視角」的補充參考資訊，合併進 data\data.json：
     - marginTrading：台積電(2330)融資融券餘額 (TWSE OpenAPI MI_MARGN)
     - soxIndex / taiexIndex：費城半導體指數(SOX)、加權指數(TAIEX) (Yahoo Finance)
+    - institutionalNet：三大法人（外資/投信/合計）買賣超 (TWSE 舊版 rwd/zh/fund/T86)
     - exDividend：近期除權息預告 (TWSE OpenAPI TWT48U_ALL)
     - optionsMarket：台指選擇權(TXO)未平倉 Put/Call Ratio (TAIFEX OpenAPI)
   每段資料來源獨立 try/catch，單一來源失敗不影響其他欄位，邏輯與
@@ -70,6 +71,34 @@ function Get-YahooIndex($symbol) {
     return [PSCustomObject]@{ price = $price; changePct = $changePct; quoteTime = $quoteTime }
 }
 
+function Get-InstitutionalNet($Daily) {
+    for ($back = 0; $back -lt 5; $back++) {
+        $idx = $Daily.Count - 1 - $back
+        if ($idx -lt 0) { break }
+        $tryDate = $Daily[$idx].date -replace "-", ""
+        $url = "https://www.twse.com.tw/rwd/zh/fund/T86?date=$tryDate&selectType=ALL&response=json"
+        $resp = Invoke-JsonGet $url
+        if ($resp.stat -eq "OK" -and $resp.data) {
+            $row = $resp.data | Where-Object { $_[0] -eq $StockNo } | Select-Object -First 1
+            if ($row) {
+                $foreignNet = 0.0
+                $v4 = ConvertTo-Num $row[4]; if ($v4) { $foreignNet += $v4 }
+                $v7 = ConvertTo-Num $row[7]; if ($v7) { $foreignNet += $v7 }
+                $trustNet = ConvertTo-Num $row[10]
+                $totalNet = ConvertTo-Num $row[18]
+                return [PSCustomObject]@{
+                    date           = $Daily[$idx].date
+                    foreignNetLots = [math]::Round($foreignNet / 1000)
+                    trustNetLots   = $(if ($null -ne $trustNet) { [math]::Round($trustNet / 1000) } else { $null })
+                    totalNetLots   = $(if ($null -ne $totalNet) { [math]::Round($totalNet / 1000) } else { $null })
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 400
+    }
+    throw "T86 回溯5個交易日仍查無2330資料"
+}
+
 function Get-ExDividend {
     $rows = Invoke-JsonGet "https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL"
     $matches = @($rows | Where-Object { $_.Code -eq $StockNo } | Sort-Object Date)
@@ -118,8 +147,9 @@ $raw = Get-Content $DataPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $raw | Add-Member -MemberType NoteProperty -Name "marginTrading" -Value (Invoke-Safe "融資融券餘額" { Get-MarginTrading }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "soxIndex" -Value (Invoke-Safe "SOX指數" { Get-YahooIndex "^SOX" }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "taiexIndex" -Value (Invoke-Safe "TAIEX指數" { Get-YahooIndex "^TWII" }) -Force
+$raw | Add-Member -MemberType NoteProperty -Name "institutionalNet" -Value (Invoke-Safe "三大法人買賣超" { Get-InstitutionalNet $raw.daily }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "exDividend" -Value (Invoke-Safe "除權息預告" { Get-ExDividend }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "optionsMarket" -Value (Invoke-Safe "選擇權未平倉" { Get-OptionsMarket }) -Force
 
 $raw | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $DataPath -Encoding utf8
-Write-Host "已更新 marginTrading / soxIndex / taiexIndex / exDividend / optionsMarket"
+Write-Host "已更新 marginTrading / soxIndex / taiexIndex / institutionalNet / exDividend / optionsMarket"
