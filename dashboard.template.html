@@ -53,6 +53,9 @@
   .modal-close { position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); font-size: 16px; line-height: 1; cursor: pointer; z-index: 1; display: flex; align-items: center; justify-content: center; }
   .modal-close:hover { background: var(--page); }
   .modal-box iframe { width: 100%; height: 100%; border: none; display: block; }
+  #back-to-top { position: fixed; right: 20px; bottom: 20px; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); box-shadow: var(--card-shadow); font-size: 20px; line-height: 1; cursor: pointer; z-index: 500; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
+  #back-to-top.visible { opacity: 1; pointer-events: auto; display: flex; }
+  #back-to-top:hover { background: var(--page); }
   .metric-label { font-size: 12px; color: var(--muted); }
   .metric-value { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .zones-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
@@ -204,6 +207,8 @@
   ⚠️ 本頁面僅供分析參考，不構成投資建議。ADR與匯率資料非交易所官方即時feed，而是雙來源交叉比對後採用，可能與實際成交價有落差；估值分區門檻為分析框架下的參考值，非保證買賣訊號。實際交易前請以官方即時報價為準，並自行承擔投資風險。<br/>
   資料來源：TWSE `STOCK_DAY`／`BWIBBU_d`／OpenAPI `t187ap14_L`、stockanalysis.com、finance.yahoo.com、tw.stock.yahoo.com。
 </footer>
+
+<button id="back-to-top" aria-label="回到頂部" title="回到頂部" type="button">↑</button>
 
 <script id="dashboard-data" type="application/json">__DASHBOARD_DATA__</script>
 <script>
@@ -886,6 +891,21 @@
   closeBtn.addEventListener('click', closeModal);
   overlay.addEventListener('click', function (e) { if (e.target === overlay) closeModal(); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && overlay.classList.contains('open')) closeModal(); });
+})();
+
+// 回到頂部按鈕：往下捲動超過一定距離才顯示，點擊平滑捲回頂部
+(function () {
+  const btn = document.getElementById('back-to-top');
+  if (!btn) return;
+  function toggle() {
+    if (window.scrollY > 400) btn.classList.add('visible');
+    else btn.classList.remove('visible');
+  }
+  window.addEventListener('scroll', toggle, { passive: true });
+  btn.addEventListener('click', function () {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+  toggle();
 })();
 
 // 若被嵌入 iframe（例如 shunshun.dev 首頁），主動回報實際內容高度給父頁面，
