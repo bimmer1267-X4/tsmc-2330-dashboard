@@ -39,6 +39,14 @@
   .delta.up { color: var(--good); } .delta.down { color: var(--critical); }
   .zone-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px; font-weight: 600; font-size: 14px; }
   .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; margin-top: 16px; }
+  .trend-summary { border-radius: 8px; padding: 10px 12px; border: 1px solid var(--border); border-left: 4px solid var(--muted); margin-top: 12px; font-size: 13px; line-height: 1.7; display: none; }
+  .trend-summary.up { border-left-color: var(--good); }
+  .trend-summary.down { border-left-color: var(--critical); }
+  .trend-summary .verdict { font-weight: 700; font-size: 14px; }
+  .trend-summary.up .verdict { color: var(--good); }
+  .trend-summary.down .verdict { color: var(--critical); }
+  .trend-summary .reasons { color: var(--text-secondary); margin-top: 4px; }
+  .trend-summary .risk { color: var(--warning); margin-top: 4px; font-size: 12px; }
   .metric-label { font-size: 12px; color: var(--muted); }
   .metric-value { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .zones-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
@@ -101,6 +109,7 @@
 <div class="card" id="market-context-card">
   <div style="font-weight:600; margin-bottom:2px;">籌碼面與大盤指數</div>
   <div class="sub">三大法人買賣超、融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
+  <div class="trend-summary" id="market-context-summary"></div>
   <div class="metrics" id="market-context-grid"></div>
 </div>
 
@@ -255,6 +264,22 @@
   // 每個資料源都可能單獨抓取失敗（欄位為 null），逐項檢查存在才加進清單，
   // 缺的項目自然不會出現，不會顯示一排「—」。
   (function(){
+    const summaryEl = document.getElementById('market-context-summary');
+    const summary = raw.chipTrend;
+    if (summary) {
+      summaryEl.style.display = 'block';
+      summaryEl.className = 'trend-summary' + (summary.cls ? ' ' + summary.cls : '');
+      let html = '<div class="verdict">籌碼面綜合研判：' + summary.verdict + '</div>';
+      if (summary.reasons.length) {
+        html += '<div class="reasons">' + summary.reasons.join('、') + '</div>';
+      }
+      if (summary.risk.length) {
+        html += '<div class="risk">⚠ ' + summary.risk.join('；') + '</div>';
+      }
+      html += '<div class="reasons" style="margin-top:6px; font-size:11px;">＊規則式統計摘要，非投資建議，僅供參考</div>';
+      summaryEl.innerHTML = html;
+    }
+
     const mc = [];
     if (raw.soxIndex) {
       const s = raw.soxIndex;
