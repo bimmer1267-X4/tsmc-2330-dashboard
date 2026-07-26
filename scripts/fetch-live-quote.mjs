@@ -19,29 +19,38 @@ function toNum(s) {
   return Number.isFinite(v) ? v : null;
 }
 
+// 回傳 null 代表「今天大概不是交易日／目前沒有可用報價」，這是預期內會發生的情況
+// （例如國定假日排程照樣每5分鐘觸發一次），呼叫端應該安靜跳過，不要當成錯誤讓
+// workflow 失敗——不然遇到連續假期，Actions 頁面會整天被同一個原因的紅色 X 洗版。
+// 真正的錯誤（HTTP 失敗、JSON 格式不對）還是照樣 throw，讓 workflow 顯示失敗，
+// 因為那種才是真的需要留意的異常。
 async function fetchLiveQuote() {
   const url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_2330.tw&json=1&delay=0";
   const res = await fetch(url, { headers: { "User-Agent": UA } });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
   const item = json.msgArray && json.msgArray[0];
-  if (!item) throw new Error("回應中沒有 msgArray[0]（可能不是交易時段，或股票代碼錯誤）");
+  if (!item) return null;
 
   // z = 成交價；盤中尚無成交時 z 會是 "-"，退回昨收 y
   const price = toNum(item.z) ?? toNum(item.y);
-  if (price == null) throw new Error("無法解析報價（z/y 皆為空）");
+  if (price == null) return null;
 
   // item.d 格式如 "20260727"
   const d = item.d;
   const date = d && d.length === 8 ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : null;
-  if (!date) throw new Error(`無法解析報價日期: ${d}`);
+  if (!date) return null;
 
   return { date, time: item.t || null, price };
 }
 
 async function main() {
-  const raw = JSON.parse(await readFile(DATA_PATH, "utf8"));
   const liveQuote = await fetchLiveQuote();
+  if (!liveQuote) {
+    console.log("目前沒有可用的即時報價（可能不是交易日，或尚未開盤），本次跳過。");
+    return;
+  }
+  const raw = JSON.parse(await readFile(DATA_PATH, "utf8"));
   raw.liveQuote = liveQuote;
   await writeFile(DATA_PATH, JSON.stringify(raw), "utf8");
   console.log(`已更新 liveQuote: ${liveQuote.date} ${liveQuote.time} ${liveQuote.price}`);
