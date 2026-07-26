@@ -105,6 +105,12 @@
   .analog-table th:nth-child(6), .analog-table td:nth-child(6) { text-align: left; }
   .analog-table th { color: var(--muted); font-weight: 600; font-size: 11px; white-space: nowrap; }
   .analog-table tbody tr:hover { background: var(--page); }
+  .etf-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .etf-table th, .etf-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }
+  .etf-table th { color: var(--muted); font-weight: 600; font-size: 11px; }
+  .etf-table td:last-child, .etf-table th:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .etf-table tbody tr:hover { background: var(--page); }
+  .etf-weight { display: inline-block; padding: 2px 9px; border-radius: 999px; font-weight: 700; font-size: 12px; background: rgba(227,73,72,0.12); color: var(--down); }
 </style>
 
 <div class="card">
@@ -191,6 +197,27 @@
   <div class="src" id="forecast-reasons"></div>
   <div class="warning-banner" id="forecast-warning"></div>
   <div class="forecast-note" id="forecast-source-note"></div>
+</div>
+
+<div class="card">
+  <div style="font-weight:600; margin-bottom:2px;">高「含積量」ETF（台積電占比 &gt; 40%）</div>
+  <div class="sub">台積電股價高，買一張的門檻不低；這些台股市值型ETF因未設個股權重上限，台積電長期占比都在四成以上，是取得台積電曝險的替代方案之一，但也代表這些ETF的漲跌高度連動台積電，分散效果有限</div>
+  <div class="analog-scroll">
+    <table class="etf-table">
+      <thead>
+        <tr><th>代碼</th><th>ETF名稱</th><th>追蹤指數</th><th>台積電占比(約)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0052</td><td>富邦科技</td><td>台灣資訊科技指數</td><td><span class="etf-weight">約64%</span></td></tr>
+        <tr><td>0050</td><td>元大台灣50</td><td>台灣50指數</td><td><span class="etf-weight">約58%</span></td></tr>
+        <tr><td>006208</td><td>富邦台50</td><td>台灣50指數</td><td><span class="etf-weight">約57%</span></td></tr>
+        <tr><td>0057</td><td>富邦摩台</td><td>MSCI台灣指數</td><td><span class="etf-weight">50%以上</span></td></tr>
+        <tr><td>006203</td><td>元大MSCI台灣</td><td>MSCI台灣指數</td><td><span class="etf-weight">50%以上</span></td></tr>
+        <tr><td>00692</td><td>富邦公司治理</td><td>臺灣公司治理100指數</td><td><span class="etf-weight">50%以上</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="src">＊占比為2026年初財經媒體整理之參考數字，僅供了解「含積量」概念，非即時數據；ETF成分股權重會隨台積電股價與基金每月／每季調整持股而變動，實際占比請以各基金公司官網最新月報為準，本表不構成投資建議。</div>
 </div>
 
 <div class="card">
