@@ -903,6 +903,42 @@
       } catch (e) { /* 網路暫時失敗就跳過，下次輪詢再試 */ }
     }, 60000);
   })();
+
+  // 盤中即時報價（直接從瀏覽器呼叫TWSE API，不依賴GitHub Actions排程）：
+  // 上面「輪詢 data/data.json」這條路徑，仰賴 GitHub Actions 排程每5分鐘把最新報價
+  // commit 進 data.json；但排程觸發本身不受我們控制，一旦GitHub那端沒有如期觸發，
+  // 頁面就會停在舊報價。這裡改成頁面自己直接呼叫TWSE公開報價API，只要頁面開著、
+  // 網路正常、TWSE允許瀏覽器跨網域呼叫，就能不依賴任何排程、直接反映最新成交價。
+  // 若TWSE不允許跨網域呼叫或呼叫失敗，安靜略過即可，上面那條輪詢 data.json 的路徑
+  // 仍會在資料寫入後接手更新，兩者互為備援。
+  (function () {
+    function toNum(s) {
+      if (s === null || s === undefined) return null;
+      const t = String(s).replace(/,/g, '').trim();
+      if (t === '' || t === '-') return null;
+      const v = Number(t);
+      return Number.isFinite(v) ? v : null;
+    }
+    async function fetchLiveQuoteDirect() {
+      if (!isTradingWindowTaipei()) return;
+      try {
+        const res = await fetch('https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_2330.tw&json=1&delay=0', { cache: 'no-store' });
+        if (!res.ok) return;
+        const json = await res.json();
+        const item = json.msgArray && json.msgArray[0];
+        if (!item) return;
+        const price = toNum(item.z) ?? toNum(item.y);
+        if (price == null) return;
+        const d = item.d;
+        const date = d && d.length === 8 ? (d.slice(0,4)+'-'+d.slice(4,6)+'-'+d.slice(6,8)) : null;
+        if (!date) return;
+        raw.liveQuote = { date: date, time: item.t || null, price: price };
+        renderHero(raw);
+      } catch (e) { /* CORS被擋或網路失敗，安靜略過，交給輪詢data.json的備援路徑 */ }
+    }
+    fetchLiveQuoteDirect();
+    setInterval(fetchLiveQuoteDirect, 60000);
+  })();
 })();
 
 // AI籌碼面分析：點連結不開新分頁，改用簡易視窗框架（iframe modal）顯示，
