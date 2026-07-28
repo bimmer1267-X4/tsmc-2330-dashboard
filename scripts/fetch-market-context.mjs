@@ -154,6 +154,34 @@ async function fetchOptionsMarket() {
   };
 }
 
+// 台指期(TX)近月合約盤後交易時段(夜盤)最新成交/收盤價。跟fetchOptionsMarket同一個
+// TAIFEX OpenAPI，用DailyMarketReportFut這個「期貨」版本的對應端點(Opt是選擇權版本)。
+// 盤後(夜盤，15:00~次日05:00)交易與結算是併入「次一般交易時段」處理，不是獨立公告，
+// 所以每日排程06:00執行時，前一晚05:00收盤的夜盤最後成交價理論上已經可以查得到。
+// 近月合約：依「交易月份」字串排序取最小的一筆，避免自己手動算合約代碼(每月換月)。
+//
+// 這個端點的實際欄位名稱沒辦法在開發環境驗證(TAIFEX網域被沙盒環境擋住)，只能等
+// GitHub Actions實際跑過一次才能確認欄位是否符合預期。如果Contract/TradingSession
+// 篩不到資料、或收盤價欄位解析失敗，會拋出包含原始資料的錯誤訊息方便之後除錯修正。
+async function fetchTaifexNightClose() {
+  const rows = await fetchJson("https://openapi.taifex.com.tw/v1/DailyMarketReportFut");
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error("DailyMarketReportFut 回傳空資料");
+  const night = rows.filter((r) => r["Contract"] === "TX" && r["TradingSession"] === "盤後");
+  if (night.length === 0) {
+    throw new Error(`找不到TX盤後(夜盤)時段資料，回傳筆數=${rows.length}，範例欄位=${JSON.stringify(Object.keys(rows[0] || {}))}`);
+  }
+  night.sort((a, b) => String(a["ContractMonth"]).localeCompare(String(b["ContractMonth"])));
+  const row = night[0];
+  const close = toNum(row["Close"]) ?? toNum(row["SettlementPrice"]) ?? toNum(row["Settlement"]);
+  if (close == null) throw new Error(`TX盤後資料找到但無法解析收盤價欄位，原始資料=${JSON.stringify(row)}`);
+  const date = row["Date"];
+  return {
+    contractMonth: row["ContractMonth"] || null,
+    close,
+    date: date && String(date).length === 8 ? `${String(date).slice(0, 4)}-${String(date).slice(4, 6)}-${String(date).slice(6, 8)}` : null,
+  };
+}
+
 // 規則式（非AI）籌碼面趨勢判讀：把幾個方向性訊號依權重加總算分，避免單一指標誤判。
 // 在資料抓取當下（而非瀏覽器端）就完成分類，做法比照 merge-and-classify.mjs 對
 // Trailing/Forward PE 的估值分區判讀——分析結果是資料管線的一部分、可重現，不是
@@ -225,13 +253,14 @@ async function main() {
   raw.marginTrading = await safe("融資融券餘額", fetchMarginTrading);
   raw.soxIndex = await safe("SOX指數", () => fetchYahooIndex("^SOX"));
   raw.taiexIndex = await safe("TAIEX指數", () => fetchYahooIndex("^TWII"));
+  raw.taifexNightClose = await safe("台指期夜盤收盤", fetchTaifexNightClose);
   raw.institutionalNet = await safe("三大法人買賣超", () => fetchInstitutionalNet(raw.daily));
   raw.exDividend = await safe("除權息預告", fetchExDividend);
   raw.optionsMarket = await safe("選擇權未平倉", fetchOptionsMarket);
   raw.chipTrend = await safe("籌碼面趨勢判讀", () => classifyChipTrend(raw));
 
   await writeFile(DATA_PATH, JSON.stringify(raw), "utf8");
-  console.log("已更新 marginTrading / soxIndex / taiexIndex / institutionalNet / exDividend / optionsMarket / chipTrend");
+  console.log("已更新 marginTrading / soxIndex / taiexIndex / taifexNightClose / institutionalNet / exDividend / optionsMarket / chipTrend");
 }
 
 main().catch((e) => {

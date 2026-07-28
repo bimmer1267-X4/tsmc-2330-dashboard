@@ -391,6 +391,10 @@
       const t = raw.taiexIndex;
       mc.push(['加權指數(TAIEX)', fmt(t.price,0)+' ('+(t.changePct>=0?'+':'')+fmt(t.changePct,2)+'%)']);
     }
+    if (raw.taifexNightClose) {
+      const n = raw.taifexNightClose;
+      mc.push(['台指期夜盤收盤(近月)', fmt(n.close,0) + (n.contractMonth ? ' · ' + n.contractMonth : '')]);
+    }
     if (raw.institutionalNet) {
       const inet = raw.institutionalNet;
       if (inet.foreignNetLots != null) {
