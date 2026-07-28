@@ -177,6 +177,11 @@ async function fetchTaifexNightClose(previous) {
   if (night.length === 0) {
     throw new Error(`找不到TX盤後(夜盤)時段資料，回傳筆數=${rows.length}，範例欄位=${JSON.stringify(Object.keys(rows[0] || {}))}`);
   }
+  // 除錯用：印出所有候選合約，人工核對「近月」該取哪一筆——TX代碼下可能同時混著月合約
+  // 跟週合約，光靠ContractMonth(Week)字串排序不一定挑得對，需要實際比對回傳內容才能確定。
+  console.log(`[台指期夜盤] 找到 ${night.length} 筆TX盤後候選資料: ${JSON.stringify(night.map((r) => ({
+    contractMonth: r["ContractMonth(Week)"], last: r["Last"], low: r["Low"], high: r["High"], volume: r["Volume"],
+  })))}`);
   night.sort((a, b) => String(a["ContractMonth(Week)"]).localeCompare(String(b["ContractMonth(Week)"])));
   const row = night[0];
   const close = toNum(row["Last"]) ?? toNum(row["SettlementPrice"]);

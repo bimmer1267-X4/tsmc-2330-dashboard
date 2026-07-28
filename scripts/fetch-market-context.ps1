@@ -174,6 +174,9 @@ function Get-TaifexNightClose($Previous) {
         $sampleFields = ($rows[0] | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ","
         throw "找不到TX盤後(夜盤)時段資料，回傳筆數=$($rows.Count)，範例欄位=$sampleFields"
     }
+    # 除錯用：印出所有候選合約，人工核對「近月」該取哪一筆
+    $candidates = $night | ForEach-Object { [PSCustomObject]@{ contractMonth = $_.'ContractMonth(Week)'; last = $_.Last; low = $_.Low; high = $_.High; volume = $_.Volume } }
+    Write-Host "[台指期夜盤] 找到 $($night.Count) 筆TX盤後候選資料: $($candidates | ConvertTo-Json -Compress)"
     $row = $night | Sort-Object { [string]$_.'ContractMonth(Week)' } | Select-Object -First 1
     $close = ConvertTo-Num $row.Last
     if (-not $close) { $close = ConvertTo-Num $row.SettlementPrice }
