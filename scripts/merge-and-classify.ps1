@@ -47,12 +47,18 @@ function Get-YahooDaily([string]$Symbol, [string]$Range = "6mo") {
 
     $price = $meta.regularMarketPrice
     # meta.previousClose 常缺失，meta.chartPreviousClose 是查詢範圍(range)起點之前的收盤價，
-    # 不一定是「前一個交易日」，用它算漲跌%可能落差好幾天而算錯。改為直接從每日收盤價序列
-    # 取倒數第二個有效值（= 真正的前一交易日收盤），確保漲跌%永遠是逐日比較。
-    $closes = @($series | ForEach-Object { $_.close })
-    if ($closes.Count -ge 2) {
-        $prevClose = $closes[$closes.Count - 2]
-    } else {
+    # 不一定是「前一個交易日」，用它算漲跌%可能落差好幾天而算錯。但也不能單純假設「序列裡
+    # 倒數第二筆」就是前一交易日：如果跟regularMarketTime同一天的那筆因為null被排除在
+    # series之外，陣列會整體往前偏移一格，「倒數第二」實際上會變成大前天的收盤價。改成
+    # 明確比對日期：從最新往回找，跳過跟regularMarketTime同一天的項目，取第一個「不同一天」
+    # 的有效收盤價，確保漲跌%永遠是真正的逐日比較。
+    $latestLocal = [System.TimeZoneInfo]::ConvertTimeFromUtc(([datetimeoffset]::FromUnixTimeSeconds($meta.regularMarketTime)).UtcDateTime, $tz)
+    $latestDateStr = $latestLocal.ToString("yyyy-MM-dd")
+    $prevClose = $null
+    for ($i = $series.Count - 1; $i -ge 0; $i--) {
+        if ($series[$i].date -ne $latestDateStr) { $prevClose = $series[$i].close; break }
+    }
+    if (-not $prevClose) {
         $prevClose = if ($meta.previousClose) { $meta.previousClose } else { $meta.chartPreviousClose }
     }
     $changePct = if ($prevClose) { [math]::Round(($price / $prevClose - 1) * 100, 2) } else { $null }

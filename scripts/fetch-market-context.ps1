@@ -58,11 +58,28 @@ function Get-YahooIndex($symbol) {
     $json = Invoke-JsonGet $url
     $result = $json.chart.result[0]
     if (-not $result.meta) { throw "Yahoo Finance 無資料: $symbol" }
-    $closes = @($result.indicators.quote[0].close | Where-Object { $null -ne $_ })
+    $timestamps = @($result.timestamp)
+    $rawCloses = @($result.indicators.quote[0].close)
     $price = $result.meta.regularMarketPrice
-    if ($closes.Count -ge 2) {
-        $previousClose = $closes[$closes.Count - 2]
+    # 不能單純假設「倒數第二個有效收盤價」就是前一交易日：如果當天(跟regularMarketTime
+    # 同一天)那筆是null會被過濾掉，導致陣列整體往前偏移一格，「倒數第二」實際上會變成
+    # 大前天的收盤價，算出的漲跌%會是好幾天的累積變化。改成明確比對日期：從最新往回找，
+    # 跳過跟regularMarketTime同一天的項目，取第一個「不同一天」的有效收盤價。
+    $previousClose = $null
+    if ($result.meta.regularMarketTime) {
+        $latestDateKey = [DateTimeOffset]::FromUnixTimeSeconds($result.meta.regularMarketTime).UtcDateTime.ToString("yyyy-MM-dd")
     } else {
+        $latestDateKey = $null
+    }
+    for ($i = $timestamps.Count - 1; $i -ge 0; $i--) {
+        $c = $rawCloses[$i]
+        if ($null -eq $c) { continue }
+        $dateKey = [DateTimeOffset]::FromUnixTimeSeconds($timestamps[$i]).UtcDateTime.ToString("yyyy-MM-dd")
+        if ($latestDateKey -and $dateKey -eq $latestDateKey) { continue }
+        $previousClose = $c
+        break
+    }
+    if (-not $previousClose) {
         $previousClose = $result.meta.previousClose
         if (-not $previousClose) { $previousClose = $result.meta.chartPreviousClose }
     }

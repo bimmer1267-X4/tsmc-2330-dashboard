@@ -63,10 +63,18 @@ async function fetchYahooDaily(symbol, range = REGRESSION_WINDOW) {
 
   const price = meta.regularMarketPrice;
   // meta.previousClose 常缺失，meta.chartPreviousClose 則是查詢範圍(range)起點之前的收盤價，
-  // 不一定是「前一個交易日」，用它算漲跌%可能落差好幾天而算錯。改為直接從每日收盤價序列
-  // 取倒數第二個有效值（= 真正的前一交易日收盤），確保漲跌%永遠是逐日比較。
-  const closes = series.map((s) => s.close);
-  const previousClose = closes.length >= 2 ? closes[closes.length - 2] : (meta.previousClose ?? meta.chartPreviousClose);
+  // 不一定是「前一個交易日」，用它算漲跌%可能落差好幾天而算錯。但也不能單純假設「序列裡
+  // 倒數第二筆」就是前一交易日：如果跟regularMarketTime同一天的那筆因為null被排除在series
+  // 之外，陣列會整體往前偏移一格，「倒數第二」實際上會變成大前天的收盤價（TAIEX/SOX共用
+  // 的fetchYahooIndex就出現過這個問題）。改成明確比對日期：從最新往回找，跳過跟
+  // regularMarketTime同一天的項目，取第一個「不同一天」的有效收盤價，確保漲跌%永遠是
+  // 真正的逐日比較。
+  const latestDateStr = fmt.format(new Date(meta.regularMarketTime * 1000));
+  let previousClose = null;
+  for (let i = series.length - 1; i >= 0; i--) {
+    if (series[i].date !== latestDateStr) { previousClose = series[i].close; break; }
+  }
+  if (previousClose == null) previousClose = meta.previousClose ?? meta.chartPreviousClose;
   const changePct = previousClose ? Math.round((price / previousClose - 1) * 10000) / 100 : null;
   const quoteTime = new Date(meta.regularMarketTime * 1000).toISOString();
   return { price, changePct, quoteTime, series, map };
