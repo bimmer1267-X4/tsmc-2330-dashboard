@@ -161,8 +161,16 @@ async function fetchOptionsMarket() {
 // 近月合約：依「交易月份」字串排序取最小的一筆，避免自己手動算合約代碼(每月換月)。
 //
 // 欄位名稱已用實際回傳資料驗證過(2026-07-28 GitHub Actions run)：收盤價欄位是"Last"
-// (SettlementPrice在盤後時段是字串"NULL"，隔天併入一般交易時段結算才會有值)，合約
-// 月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/"ContractMonth"。
+// 或"SettlementPrice"，合約月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/
+// "ContractMonth"。
+//
+// 2026-07-28實際比對發現：06:00這次排程抓到的"Last"(43369)跟外部來源(玩股網等)公布
+// 的官方夜盤收盤(43172)對不上，落差達197點——當時SettlementPrice還是字串"NULL"，代表
+// 結算價要等隔天併入一般交易時段(08:45後)才會算出來，06:00查到的"Last"很可能只是報表
+// 產生當下還沒收齊全部成交的暫定值。因此改成優先採用SettlementPrice(官方結算價，一旦
+// 算出來就不會再變)，只有SettlementPrice還沒算出來時才退回Last當暫定值；真正的校正靠
+// fetch-live-quote.mjs在09:02~14:02交易時段每5分鐘重抓一次，一旦SettlementPrice算出來
+// 就會自動覆蓋掉暫定的Last值。
 //
 // openapi.taifex.com.tw僅提供「最新一個交易日」，沒有歷史查詢功能，沒辦法直接跟API要
 // 前一天的收盤價來算漲跌%。改成把上一次寫進data.json的taifexNightClose當作前一天的
@@ -184,7 +192,7 @@ async function fetchTaifexNightClose(previous) {
   })))}`);
   night.sort((a, b) => String(a["ContractMonth(Week)"]).localeCompare(String(b["ContractMonth(Week)"])));
   const row = night[0];
-  const close = toNum(row["Last"]) ?? toNum(row["SettlementPrice"]);
+  const close = toNum(row["SettlementPrice"]) ?? toNum(row["Last"]);
   if (close == null) throw new Error(`TX盤後資料找到但無法解析收盤價欄位，原始資料=${JSON.stringify(row)}`);
   const rawDate = row["Date"];
   const date = rawDate && String(rawDate).length === 8

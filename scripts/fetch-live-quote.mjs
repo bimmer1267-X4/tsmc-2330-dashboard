@@ -44,16 +44,62 @@ async function fetchLiveQuote() {
   return { date, time: item.t || null, price };
 }
 
-async function main() {
-  const liveQuote = await fetchLiveQuote();
-  if (!liveQuote) {
-    console.log("目前沒有可用的即時報價（可能不是交易日，或尚未開盤），本次跳過。");
-    return;
+// 台指期(TX)近月合約盤後(夜盤)收盤價的「校正」：fetch-market-context.mjs在06:00當天第一次
+// 抓的時候，官方結算價(SettlementPrice)通常還沒算出來(要併入08:45後的一般交易時段才會有
+// 值)，只能先用當時的最後成交價(Last)頂著，跟官方結算價可能有落差(曾實測差到197點)。這裡
+// 趁交易時段每5分鐘都會執行一次的機會，重抓同一支API，一旦SettlementPrice出現就自動覆蓋掉
+// 暫定的Last值；date沒變就代表還是同一個夜盤，changePct(相對前一天)維持原本算好的值不動，
+// 只換掉close本身。
+async function refreshTaifexNightClose(raw) {
+  const url = "https://openapi.taifex.com.tw/v1/DailyMarketReportFut";
+  const res = await fetch(url, { headers: { "User-Agent": UA } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const rows = await res.json();
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  const night = rows.filter((r) => r["Contract"] === "TX" && r["TradingSession"] === "盤後");
+  if (night.length === 0) return;
+  night.sort((a, b) => String(a["ContractMonth(Week)"]).localeCompare(String(b["ContractMonth(Week)"])));
+  const row = night[0];
+  const close = toNum(row["SettlementPrice"]) ?? toNum(row["Last"]);
+  if (close == null) return;
+  const rawDate = row["Date"];
+  const date = rawDate && String(rawDate).length === 8
+    ? `${String(rawDate).slice(0, 4)}-${String(rawDate).slice(4, 6)}-${String(rawDate).slice(6, 8)}`
+    : null;
+  if (!date) return;
+
+  const prev = raw.taifexNightClose;
+  if (!prev || prev.date !== date) {
+    const changePct = prev && prev.close != null ? Math.round((close / prev.close - 1) * 10000) / 100 : null;
+    raw.taifexNightClose = { contractMonth: row["ContractMonth(Week)"] || null, close, changePct, date };
+  } else if (prev.close !== close) {
+    raw.taifexNightClose = { ...prev, close, contractMonth: row["ContractMonth(Week)"] || prev.contractMonth };
+    console.log(`已校正 taifexNightClose 收盤價: ${prev.close} -> ${close}`);
   }
+}
+
+async function main() {
   const raw = JSON.parse(await readFile(DATA_PATH, "utf8"));
-  raw.liveQuote = liveQuote;
-  await writeFile(DATA_PATH, JSON.stringify(raw), "utf8");
-  console.log(`已更新 liveQuote: ${liveQuote.date} ${liveQuote.time} ${liveQuote.price}`);
+  let changed = false;
+
+  const liveQuote = await fetchLiveQuote();
+  if (liveQuote) {
+    raw.liveQuote = liveQuote;
+    changed = true;
+    console.log(`已更新 liveQuote: ${liveQuote.date} ${liveQuote.time} ${liveQuote.price}`);
+  } else {
+    console.log("目前沒有可用的即時報價（可能不是交易日，或尚未開盤），本次跳過。");
+  }
+
+  const before = JSON.stringify(raw.taifexNightClose);
+  await refreshTaifexNightClose(raw).catch((e) => {
+    console.error("台指期夜盤收盤校正失敗（略過，不影響其他欄位）:", e.message);
+  });
+  if (JSON.stringify(raw.taifexNightClose) !== before) changed = true;
+
+  if (changed) {
+    await writeFile(DATA_PATH, JSON.stringify(raw), "utf8");
+  }
 }
 
 main().catch((e) => {
