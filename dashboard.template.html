@@ -114,7 +114,7 @@
 </style>
 
 <div class="card">
-  <h1>台積電 2330 收盤價儀表板-（當日非同步股價測試中）</h1>
+  <h1>台積電 2330 收盤價儀表板-（當日非同步股價測試中，更新時間：<span id="h1-updated-at">--</span>）</h1>
   <div class="sub">資料更新時間：<span id="updated-at">--</span>（台灣時間）｜資料來源：TWSE 台灣證券交易所（股價/本益比/EPS）、stockanalysis.com＋Yahoo Finance 交叉比對（ADR）、Yahoo股市（匯率）</div>
   <div class="header-row">
     <div>
@@ -255,6 +255,13 @@
 
   function fmt(v, d) { return v == null ? '—' : Number(v).toLocaleString('zh-TW', {minimumFractionDigits:d||0, maximumFractionDigits:d||0}); }
 
+  // ISO時間字串 -> 台北時間「X年X月X日X時X分X秒」，供標題顯示用
+  function formatZhDateTime(iso) {
+    const taipei = new Date(new Date(iso).getTime() + 8 * 3600 * 1000);
+    return taipei.getUTCFullYear() + '年' + (taipei.getUTCMonth()+1) + '月' + taipei.getUTCDate() + '日' +
+      taipei.getUTCHours() + '時' + taipei.getUTCMinutes() + '分' + taipei.getUTCSeconds() + '秒';
+  }
+
   // 渲染最上方大字股價。若 liveQuote 存在且日期比 daily 陣列最後一天新（代表當天盤中、
   // 隔夜完整重算還沒跑），就改用盤中即時報價，漲跌幅改以「昨收」（daily 最後一天）為基準；
   // 否則沿用每日收盤資料。獨立成函式是因為盤中輪詢（見檔案底部）會用新抓到的資料重新呼叫它。
@@ -281,6 +288,7 @@
     deltaEl.textContent = (chg>=0?'+':'') + fmt(chg,2) + ' (' + (chg>=0?'+':'') + chgPct + '%)';
     deltaEl.className = 'delta ' + (chg>=0?'up':'down');
     document.getElementById('updated-at').textContent = new Date(r.generatedAt).toLocaleString('zh-TW', {hour12:false, timeZone:'Asia/Taipei'}) + liveNote;
+    document.getElementById('h1-updated-at').textContent = formatZhDateTime(r.generatedAt);
   }
   renderHero(raw);
 
