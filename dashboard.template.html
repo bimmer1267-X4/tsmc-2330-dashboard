@@ -393,7 +393,7 @@
     }
     if (raw.taifexNightClose) {
       const n = raw.taifexNightClose;
-      mc.push(['台指期夜盤收盤(近月)', fmt(n.close,0) + (n.contractMonth ? ' · ' + n.contractMonth : '')]);
+      mc.push(['台指期收盤', fmt(n.close,0) + (n.changePct!=null ? ' ('+(n.changePct>=0?'+':'')+fmt(n.changePct,2)+'%)' : '')]);
     }
     if (raw.institutionalNet) {
       const inet = raw.institutionalNet;
