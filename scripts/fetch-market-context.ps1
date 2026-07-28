@@ -158,9 +158,9 @@ function Get-OptionsMarket {
 # 執行時，前一晚05:00收盤的夜盤最後成交價理論上已經可以查得到。近月合約：依「交易月份」
 # 字串排序取最小的一筆，避免自己手動算合約代碼(每月換月)。
 #
-# 這個端點的實際欄位名稱沒辦法在開發環境驗證(TAIFEX網域被沙盒環境擋住)，只能等實際排程
-# 跑過一次才能確認欄位是否符合預期。如果Contract/TradingSession篩不到資料、或收盤價欄位
-# 解析失敗，會拋出包含原始資料的錯誤訊息方便之後除錯修正。
+# 欄位名稱已用實際回傳資料驗證過(2026-07-28 GitHub Actions run)：收盤價欄位是"Last"
+# (SettlementPrice在盤後時段是字串"NULL"，隔天併入一般交易時段結算才會有值)，合約
+# 月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/"ContractMonth"。
 function Get-TaifexNightClose {
     $rows = Invoke-JsonGet "https://openapi.taifex.com.tw/v1/DailyMarketReportFut"
     if (-not $rows -or $rows.Count -eq 0) { throw "DailyMarketReportFut 回傳空資料" }
@@ -169,17 +169,16 @@ function Get-TaifexNightClose {
         $sampleFields = ($rows[0] | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ","
         throw "找不到TX盤後(夜盤)時段資料，回傳筆數=$($rows.Count)，範例欄位=$sampleFields"
     }
-    $row = $night | Sort-Object { [string]$_.ContractMonth } | Select-Object -First 1
-    $close = ConvertTo-Num $row.Close
+    $row = $night | Sort-Object { [string]$_.'ContractMonth(Week)' } | Select-Object -First 1
+    $close = ConvertTo-Num $row.Last
     if (-not $close) { $close = ConvertTo-Num $row.SettlementPrice }
-    if (-not $close) { $close = ConvertTo-Num $row.Settlement }
     if (-not $close) { throw "TX盤後資料找到但無法解析收盤價欄位，原始資料=$($row | ConvertTo-Json -Compress)" }
     $isoDate = $null
     if ($row.Date -and ([string]$row.Date).Length -eq 8) {
         $d = [string]$row.Date
         $isoDate = "{0}-{1}-{2}" -f $d.Substring(0,4), $d.Substring(4,2), $d.Substring(6,2)
     }
-    return [PSCustomObject]@{ contractMonth = $row.ContractMonth; close = $close; date = $isoDate }
+    return [PSCustomObject]@{ contractMonth = $row.'ContractMonth(Week)'; close = $close; date = $isoDate }
 }
 
 function Get-ChipTrend($Raw) {
