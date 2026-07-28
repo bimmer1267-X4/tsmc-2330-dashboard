@@ -160,9 +160,9 @@ async function fetchOptionsMarket() {
 // 所以每日排程06:00執行時，前一晚05:00收盤的夜盤最後成交價理論上已經可以查得到。
 // 近月合約：依「交易月份」字串排序取最小的一筆，避免自己手動算合約代碼(每月換月)。
 //
-// 這個端點的實際欄位名稱沒辦法在開發環境驗證(TAIFEX網域被沙盒環境擋住)，只能等
-// GitHub Actions實際跑過一次才能確認欄位是否符合預期。如果Contract/TradingSession
-// 篩不到資料、或收盤價欄位解析失敗，會拋出包含原始資料的錯誤訊息方便之後除錯修正。
+// 欄位名稱已用實際回傳資料驗證過(2026-07-28 GitHub Actions run)：收盤價欄位是"Last"
+// (SettlementPrice在盤後時段是字串"NULL"，隔天併入一般交易時段結算才會有值)，合約
+// 月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/"ContractMonth"。
 async function fetchTaifexNightClose() {
   const rows = await fetchJson("https://openapi.taifex.com.tw/v1/DailyMarketReportFut");
   if (!Array.isArray(rows) || rows.length === 0) throw new Error("DailyMarketReportFut 回傳空資料");
@@ -170,13 +170,13 @@ async function fetchTaifexNightClose() {
   if (night.length === 0) {
     throw new Error(`找不到TX盤後(夜盤)時段資料，回傳筆數=${rows.length}，範例欄位=${JSON.stringify(Object.keys(rows[0] || {}))}`);
   }
-  night.sort((a, b) => String(a["ContractMonth"]).localeCompare(String(b["ContractMonth"])));
+  night.sort((a, b) => String(a["ContractMonth(Week)"]).localeCompare(String(b["ContractMonth(Week)"])));
   const row = night[0];
-  const close = toNum(row["Close"]) ?? toNum(row["SettlementPrice"]) ?? toNum(row["Settlement"]);
+  const close = toNum(row["Last"]) ?? toNum(row["SettlementPrice"]);
   if (close == null) throw new Error(`TX盤後資料找到但無法解析收盤價欄位，原始資料=${JSON.stringify(row)}`);
   const date = row["Date"];
   return {
-    contractMonth: row["ContractMonth"] || null,
+    contractMonth: row["ContractMonth(Week)"] || null,
     close,
     date: date && String(date).length === 8 ? `${String(date).slice(0, 4)}-${String(date).slice(4, 6)}-${String(date).slice(6, 8)}` : null,
   };
