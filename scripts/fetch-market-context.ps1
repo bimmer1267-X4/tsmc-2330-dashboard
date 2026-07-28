@@ -152,6 +152,36 @@ function Get-OptionsMarket {
     return [PSCustomObject]@{ date = $isoDate; callOI = $callOI; putOI = $putOI; putCallRatio = $ratio }
 }
 
+# 台指期(TX)近月合約盤後交易時段(夜盤)最新成交/收盤價。跟Get-OptionsMarket同一個TAIFEX
+# OpenAPI，用DailyMarketReportFut這個「期貨」版本的對應端點(Opt是選擇權版本)。盤後(夜盤，
+# 15:00~次日05:00)交易與結算併入「次一般交易時段」處理，不是獨立公告，所以每日排程06:00
+# 執行時，前一晚05:00收盤的夜盤最後成交價理論上已經可以查得到。近月合約：依「交易月份」
+# 字串排序取最小的一筆，避免自己手動算合約代碼(每月換月)。
+#
+# 這個端點的實際欄位名稱沒辦法在開發環境驗證(TAIFEX網域被沙盒環境擋住)，只能等實際排程
+# 跑過一次才能確認欄位是否符合預期。如果Contract/TradingSession篩不到資料、或收盤價欄位
+# 解析失敗，會拋出包含原始資料的錯誤訊息方便之後除錯修正。
+function Get-TaifexNightClose {
+    $rows = Invoke-JsonGet "https://openapi.taifex.com.tw/v1/DailyMarketReportFut"
+    if (-not $rows -or $rows.Count -eq 0) { throw "DailyMarketReportFut 回傳空資料" }
+    $night = $rows | Where-Object { $_.Contract -eq "TX" -and $_.TradingSession -eq "盤後" }
+    if (-not $night -or $night.Count -eq 0) {
+        $sampleFields = ($rows[0] | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ","
+        throw "找不到TX盤後(夜盤)時段資料，回傳筆數=$($rows.Count)，範例欄位=$sampleFields"
+    }
+    $row = $night | Sort-Object { [string]$_.ContractMonth } | Select-Object -First 1
+    $close = ConvertTo-Num $row.Close
+    if (-not $close) { $close = ConvertTo-Num $row.SettlementPrice }
+    if (-not $close) { $close = ConvertTo-Num $row.Settlement }
+    if (-not $close) { throw "TX盤後資料找到但無法解析收盤價欄位，原始資料=$($row | ConvertTo-Json -Compress)" }
+    $isoDate = $null
+    if ($row.Date -and ([string]$row.Date).Length -eq 8) {
+        $d = [string]$row.Date
+        $isoDate = "{0}-{1}-{2}" -f $d.Substring(0,4), $d.Substring(4,2), $d.Substring(6,2)
+    }
+    return [PSCustomObject]@{ contractMonth = $row.ContractMonth; close = $close; date = $isoDate }
+}
+
 function Get-ChipTrend($Raw) {
     $score = 0.0; $weightSum = 0.0
     $reasons = @()
@@ -220,10 +250,11 @@ $raw = Get-Content $DataPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $raw | Add-Member -MemberType NoteProperty -Name "marginTrading" -Value (Invoke-Safe "融資融券餘額" { Get-MarginTrading }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "soxIndex" -Value (Invoke-Safe "SOX指數" { Get-YahooIndex "^SOX" }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "taiexIndex" -Value (Invoke-Safe "TAIEX指數" { Get-YahooIndex "^TWII" }) -Force
+$raw | Add-Member -MemberType NoteProperty -Name "taifexNightClose" -Value (Invoke-Safe "台指期夜盤收盤" { Get-TaifexNightClose }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "institutionalNet" -Value (Invoke-Safe "三大法人買賣超" { Get-InstitutionalNet $raw.daily }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "exDividend" -Value (Invoke-Safe "除權息預告" { Get-ExDividend }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "optionsMarket" -Value (Invoke-Safe "選擇權未平倉" { Get-OptionsMarket }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "chipTrend" -Value (Invoke-Safe "籌碼面趨勢判讀" { Get-ChipTrend $raw }) -Force
 
 $raw | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $DataPath -Encoding utf8
-Write-Host "已更新 marginTrading / soxIndex / taiexIndex / institutionalNet / exDividend / optionsMarket / chipTrend"
+Write-Host "已更新 marginTrading / soxIndex / taiexIndex / taifexNightClose / institutionalNet / exDividend / optionsMarket / chipTrend"
