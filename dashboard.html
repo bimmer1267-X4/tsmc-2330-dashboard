@@ -114,7 +114,7 @@
 </style>
 
 <div class="card">
-  <h1>台積電 2330 股價儀表板</h1>
+  <h1>台積電 2330 收盤股價儀表板 <span id="h1-date"></span></h1>
   <div class="sub">資料更新時間：<span id="updated-at">--</span>（台灣時間）｜資料來源：TWSE 台灣證券交易所（股價/本益比/EPS）、stockanalysis.com＋Yahoo Finance 交叉比對（ADR）、Yahoo股市（匯率）</div>
   <div class="header-row">
     <div>
@@ -281,6 +281,8 @@
     deltaEl.textContent = (chg>=0?'+':'') + fmt(chg,2) + ' (' + (chg>=0?'+':'') + chgPct + '%)';
     deltaEl.className = 'delta ' + (chg>=0?'up':'down');
     document.getElementById('updated-at').textContent = new Date(r.generatedAt).toLocaleString('zh-TW', {hour12:false, timeZone:'Asia/Taipei'}) + liveNote;
+    const [dy, dm, dd] = lastBar.date.split('-');
+    document.getElementById('h1-date').textContent = dy + '年' + Number(dm) + '月' + Number(dd) + '日';
   }
   renderHero(raw);
 
