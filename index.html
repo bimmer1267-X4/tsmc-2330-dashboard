@@ -288,7 +288,16 @@
     deltaEl.textContent = (chg>=0?'+':'') + fmt(chg,2) + ' (' + (chg>=0?'+':'') + chgPct + '%)';
     deltaEl.className = 'delta ' + (chg>=0?'up':'down');
     document.getElementById('updated-at').textContent = new Date(r.generatedAt).toLocaleString('zh-TW', {hour12:false, timeZone:'Asia/Taipei'}) + liveNote;
-    document.getElementById('h1-updated-at').textContent = formatZhDateTime(r.generatedAt);
+
+    // 標題括號內的「更新時間」要能反映live-quote.yml每5分鐘的重新整理，不能只看
+    // generatedAt——那個時間只在每日完整流程跑完時才會變，fetch-live-quote.mjs
+    // 只更新liveQuote、不會動generatedAt。這裡取兩者較新的一個當作實際更新時間。
+    let latestUpdateMs = new Date(r.generatedAt).getTime();
+    if (r.liveQuote && r.liveQuote.date && r.liveQuote.price != null) {
+      const liveMs = new Date(r.liveQuote.date + 'T' + (r.liveQuote.time || '00:00:00') + '+08:00').getTime();
+      if (Number.isFinite(liveMs) && liveMs > latestUpdateMs) latestUpdateMs = liveMs;
+    }
+    document.getElementById('h1-updated-at').textContent = formatZhDateTime(new Date(latestUpdateMs).toISOString());
   }
   renderHero(raw);
 
