@@ -290,6 +290,12 @@
     document.querySelectorAll('.card-updated-at').forEach((el) => { el.textContent = text; });
   }
 
+  // 記錄目前畫面上顯示的「最新更新時間」，用來判斷這次renderHero是不是真的有新資料，
+  // 避免每次輪詢（無論是輪詢data.json還是前端直接呼叫TWSE）都把時間戳刷成「現在」——
+  // 那樣會變成顯示「頁面上次檢查的時間」而不是「資料實際更新的時間」，兩者意義不同：
+  // 如果盤中報價/generatedAt根本沒變，這裡的時間就應該原地不動，不能每次輪詢就往前跳。
+  let lastRenderedUpdateIso = null;
+
   // 渲染最上方大字股價。若 liveQuote 存在且日期比 daily 陣列最後一天新（代表當天盤中、
   // 隔夜完整重算還沒跑），就改用盤中即時報價，漲跌幅改以「昨收」（daily 最後一天）為基準；
   // 否則沿用每日收盤資料。獨立成函式是因為盤中輪詢（見檔案底部）會用新抓到的資料重新呼叫它。
@@ -318,8 +324,11 @@
     document.getElementById('updated-at').textContent = new Date(r.generatedAt).toLocaleString('zh-TW', {hour12:false, timeZone:'Asia/Taipei'}) + liveNote;
 
     const latestUpdateIso = getLatestUpdateIso(r);
-    document.getElementById('h1-updated-at').textContent = formatZhDateTime(latestUpdateIso);
-    updateCardTimestamps(r);
+    if (latestUpdateIso !== lastRenderedUpdateIso) {
+      lastRenderedUpdateIso = latestUpdateIso;
+      document.getElementById('h1-updated-at').textContent = formatZhDateTime(latestUpdateIso);
+      updateCardTimestamps(r);
+    }
   }
   renderHero(raw);
 
