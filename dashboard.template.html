@@ -130,11 +130,13 @@
 </div>
 
 <div class="card" id="market-context-card">
-  <div style="font-weight:600; margin-bottom:2px;">籌碼面與大盤指數</div>
+  <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:2px;">
+    <div style="font-weight:600;">籌碼面與大盤指數</div>
+    <a href="chip-analysis.html" id="chip-analysis-link" style="font-size:13px; color:var(--up); text-decoration:none; cursor:pointer; white-space:nowrap;">📊 查看AI籌碼面分析摘要 →</a>
+  </div>
   <div class="sub">三大法人買賣超、融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
   <div class="trend-summary" id="market-context-summary"></div>
   <div class="metrics" id="market-context-grid"></div>
-  <div style="margin-top:12px;"><a href="chip-analysis.html" id="chip-analysis-link" style="font-size:13px; color:var(--up); text-decoration:none; cursor:pointer;">📊 查看AI籌碼面分析摘要 →</a></div>
 </div>
 
 <div class="modal-overlay" id="chip-analysis-modal-overlay">
