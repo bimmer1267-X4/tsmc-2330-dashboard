@@ -64,9 +64,25 @@ async function fetchYahooIndex(symbol) {
   const result = json?.chart?.result?.[0];
   if (!result?.meta) throw new Error(`Yahoo Finance 無資料: ${symbol}`);
   const { meta, timestamp = [] } = result;
-  const closes = (result.indicators?.quote?.[0]?.close ?? []).filter((v) => v != null);
+  const rawCloses = result.indicators?.quote?.[0]?.close ?? [];
   const price = meta.regularMarketPrice;
-  const previousClose = closes.length >= 2 ? closes[closes.length - 2] : (meta.previousClose ?? meta.chartPreviousClose);
+  // 不能單純假設「倒數第二個有效收盤價」就是前一交易日：如果當天(跟regularMarketTime
+  // 同一天)那筆是null會被filter掉，導致陣列整體往前偏移一格，「倒數第二」實際上會變成
+  // 大前天的收盤價，算出的漲跌%會是好幾天的累積變化，不是真正的單日變化（歷史上TAIEX
+  // 就出現過這個問題，SOX因為當天那筆剛好不是null才沒事，兩者用同一份邏輯卻表現不一致）。
+  // 改成明確比對日期：從最新往回找，跳過跟regularMarketTime同一天的項目，取第一個「不同
+  // 一天」的有效收盤價，不依賴陣列位置，才能保證永遠是真正的前一交易日。
+  const latestDateKey = meta.regularMarketTime != null ? new Date(meta.regularMarketTime * 1000).toISOString().slice(0, 10) : null;
+  let previousClose = null;
+  for (let i = timestamp.length - 1; i >= 0; i--) {
+    const c = rawCloses[i];
+    if (c == null) continue;
+    const dateKey = new Date(timestamp[i] * 1000).toISOString().slice(0, 10);
+    if (latestDateKey && dateKey === latestDateKey) continue;
+    previousClose = c;
+    break;
+  }
+  if (previousClose == null) previousClose = meta.previousClose ?? meta.chartPreviousClose;
   const changePct = previousClose ? Math.round((price / previousClose - 1) * 10000) / 100 : null;
   const quoteTime = new Date(meta.regularMarketTime * 1000).toISOString();
   return { price, changePct, quoteTime };
