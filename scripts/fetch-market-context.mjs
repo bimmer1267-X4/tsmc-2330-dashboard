@@ -163,22 +163,42 @@ async function fetchOptionsMarket() {
 // 欄位名稱已用實際回傳資料驗證過(2026-07-28 GitHub Actions run)：收盤價欄位是"Last"
 // (SettlementPrice在盤後時段是字串"NULL"，隔天併入一般交易時段結算才會有值)，合約
 // 月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/"ContractMonth"。
-async function fetchTaifexNightClose() {
+//
+// openapi.taifex.com.tw僅提供「最新一個交易日」，沒有歷史查詢功能，沒辦法直接跟API要
+// 前一天的收盤價來算漲跌%。改成把上一次寫進data.json的taifexNightClose當作前一天的
+// 基準，跟這次新抓到的比較。夜盤要整個交易日（日盤+夜盤）都結束才會公布，所以如果排程
+// 執行的時間點太早（例如手動在傍晚觸發，當天自己的夜盤還沒收），API仍會回傳跟上次一樣
+// 的舊資料——這種情況下"date"會跟上一筆存的相同，此時不能拿來算漲跌%(會變成拿同一天
+// 跟自己比較)，直接把changePct留null，等到真的有新一天的資料進來才計算。
+async function fetchTaifexNightClose(previous) {
   const rows = await fetchJson("https://openapi.taifex.com.tw/v1/DailyMarketReportFut");
   if (!Array.isArray(rows) || rows.length === 0) throw new Error("DailyMarketReportFut 回傳空資料");
   const night = rows.filter((r) => r["Contract"] === "TX" && r["TradingSession"] === "盤後");
   if (night.length === 0) {
     throw new Error(`找不到TX盤後(夜盤)時段資料，回傳筆數=${rows.length}，範例欄位=${JSON.stringify(Object.keys(rows[0] || {}))}`);
   }
+  // 除錯用：印出所有候選合約，人工核對「近月」該取哪一筆——TX代碼下可能同時混著月合約
+  // 跟週合約，光靠ContractMonth(Week)字串排序不一定挑得對，需要實際比對回傳內容才能確定。
+  console.log(`[台指期夜盤] 找到 ${night.length} 筆TX盤後候選資料: ${JSON.stringify(night.map((r) => ({
+    contractMonth: r["ContractMonth(Week)"], last: r["Last"], low: r["Low"], high: r["High"], volume: r["Volume"],
+  })))}`);
   night.sort((a, b) => String(a["ContractMonth(Week)"]).localeCompare(String(b["ContractMonth(Week)"])));
   const row = night[0];
   const close = toNum(row["Last"]) ?? toNum(row["SettlementPrice"]);
   if (close == null) throw new Error(`TX盤後資料找到但無法解析收盤價欄位，原始資料=${JSON.stringify(row)}`);
-  const date = row["Date"];
+  const rawDate = row["Date"];
+  const date = rawDate && String(rawDate).length === 8
+    ? `${String(rawDate).slice(0, 4)}-${String(rawDate).slice(4, 6)}-${String(rawDate).slice(6, 8)}`
+    : null;
+  let changePct = null;
+  if (previous && previous.close != null && previous.date && date && previous.date !== date) {
+    changePct = Math.round((close / previous.close - 1) * 10000) / 100;
+  }
   return {
     contractMonth: row["ContractMonth(Week)"] || null,
     close,
-    date: date && String(date).length === 8 ? `${String(date).slice(0, 4)}-${String(date).slice(4, 6)}-${String(date).slice(6, 8)}` : null,
+    changePct,
+    date,
   };
 }
 
@@ -253,7 +273,8 @@ async function main() {
   raw.marginTrading = await safe("融資融券餘額", fetchMarginTrading);
   raw.soxIndex = await safe("SOX指數", () => fetchYahooIndex("^SOX"));
   raw.taiexIndex = await safe("TAIEX指數", () => fetchYahooIndex("^TWII"));
-  raw.taifexNightClose = await safe("台指期夜盤收盤", fetchTaifexNightClose);
+  const previousTaifexNightClose = raw.taifexNightClose;
+  raw.taifexNightClose = await safe("台指期夜盤收盤", () => fetchTaifexNightClose(previousTaifexNightClose));
   raw.institutionalNet = await safe("三大法人買賣超", () => fetchInstitutionalNet(raw.daily));
   raw.exDividend = await safe("除權息預告", fetchExDividend);
   raw.optionsMarket = await safe("選擇權未平倉", fetchOptionsMarket);

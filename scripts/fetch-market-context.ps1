@@ -161,7 +161,12 @@ function Get-OptionsMarket {
 # 欄位名稱已用實際回傳資料驗證過(2026-07-28 GitHub Actions run)：收盤價欄位是"Last"
 # (SettlementPrice在盤後時段是字串"NULL"，隔天併入一般交易時段結算才會有值)，合約
 # 月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/"ContractMonth"。
-function Get-TaifexNightClose {
+#
+# openapi.taifex.com.tw僅提供「最新一個交易日」，沒有歷史查詢功能，沒辦法直接跟API要
+# 前一天的收盤價來算漲跌%。改成把上一次寫進data.json的taifexNightClose當作前一天的
+# 基準，跟這次新抓到的比較。如果兩次的date相同(例如太早觸發、當天夜盤還沒收)，代表
+# 資料還沒真的往前推進，不能拿來算漲跌%，changePct留null。
+function Get-TaifexNightClose($Previous) {
     $rows = Invoke-JsonGet "https://openapi.taifex.com.tw/v1/DailyMarketReportFut"
     if (-not $rows -or $rows.Count -eq 0) { throw "DailyMarketReportFut 回傳空資料" }
     $night = $rows | Where-Object { $_.Contract -eq "TX" -and $_.TradingSession -eq "盤後" }
@@ -169,6 +174,9 @@ function Get-TaifexNightClose {
         $sampleFields = ($rows[0] | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ","
         throw "找不到TX盤後(夜盤)時段資料，回傳筆數=$($rows.Count)，範例欄位=$sampleFields"
     }
+    # 除錯用：印出所有候選合約，人工核對「近月」該取哪一筆
+    $candidates = $night | ForEach-Object { [PSCustomObject]@{ contractMonth = $_.'ContractMonth(Week)'; last = $_.Last; low = $_.Low; high = $_.High; volume = $_.Volume } }
+    Write-Host "[台指期夜盤] 找到 $($night.Count) 筆TX盤後候選資料: $($candidates | ConvertTo-Json -Compress)"
     $row = $night | Sort-Object { [string]$_.'ContractMonth(Week)' } | Select-Object -First 1
     $close = ConvertTo-Num $row.Last
     if (-not $close) { $close = ConvertTo-Num $row.SettlementPrice }
@@ -178,7 +186,11 @@ function Get-TaifexNightClose {
         $d = [string]$row.Date
         $isoDate = "{0}-{1}-{2}" -f $d.Substring(0,4), $d.Substring(4,2), $d.Substring(6,2)
     }
-    return [PSCustomObject]@{ contractMonth = $row.'ContractMonth(Week)'; close = $close; date = $isoDate }
+    $changePct = $null
+    if ($Previous -and $Previous.close -and $Previous.date -and $isoDate -and $Previous.date -ne $isoDate) {
+        $changePct = [math]::Round((($close / $Previous.close) - 1) * 100, 2)
+    }
+    return [PSCustomObject]@{ contractMonth = $row.'ContractMonth(Week)'; close = $close; changePct = $changePct; date = $isoDate }
 }
 
 function Get-ChipTrend($Raw) {
@@ -249,7 +261,8 @@ $raw = Get-Content $DataPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $raw | Add-Member -MemberType NoteProperty -Name "marginTrading" -Value (Invoke-Safe "融資融券餘額" { Get-MarginTrading }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "soxIndex" -Value (Invoke-Safe "SOX指數" { Get-YahooIndex "^SOX" }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "taiexIndex" -Value (Invoke-Safe "TAIEX指數" { Get-YahooIndex "^TWII" }) -Force
-$raw | Add-Member -MemberType NoteProperty -Name "taifexNightClose" -Value (Invoke-Safe "台指期夜盤收盤" { Get-TaifexNightClose }) -Force
+$previousTaifexNightClose = $raw.taifexNightClose
+$raw | Add-Member -MemberType NoteProperty -Name "taifexNightClose" -Value (Invoke-Safe "台指期夜盤收盤" { Get-TaifexNightClose $previousTaifexNightClose }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "institutionalNet" -Value (Invoke-Safe "三大法人買賣超" { Get-InstitutionalNet $raw.daily }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "exDividend" -Value (Invoke-Safe "除權息預告" { Get-ExDividend }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "optionsMarket" -Value (Invoke-Safe "選擇權未平倉" { Get-OptionsMarket }) -Force
