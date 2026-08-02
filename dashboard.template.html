@@ -147,7 +147,7 @@
 </div>
 
 <div class="card" id="open-prediction-card">
-  <div style="font-weight:600; margin-bottom:2px;">今日台股開盤價機率預估 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
+  <div style="font-weight:600; margin-bottom:2px;">盤前股價預測 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
   <div class="sub">依近1年「ADR隔夜漲跌% + ADR溢價率偏離歷史均值 + ADR歷史相近價位類比估計缺口%」三變數迴歸模型，套用今天的ADR變動、溢價狀態與類比估計推估</div>
   <div class="header-row">
     <div>
@@ -183,7 +183,7 @@
 
 <div class="card" id="prediction-accuracy-card">
   <div style="font-weight:600; margin-bottom:2px;">開盤價預測準確度追蹤 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
-  <div class="sub">追蹤「今日台股開盤價機率預估」(OLS模型)與「ADR歷史相近價位類比估計」這兩種方法過去交易日的預測結果 vs 實際開盤表現，評估各自的方向命中率、平均誤差(偏誤)與信賴區間覆蓋率是否符合預期；樣本數不足時對應區間會先隱藏，避免早期少量樣本產生誤導性統計</div>
+  <div class="sub">追蹤「盤前股價預測」(OLS模型)與「ADR歷史相近價位類比估計」這兩種方法過去交易日的預測結果 vs 當日實際收盤表現，評估各自的方向命中率、平均誤差(偏誤)與信賴區間覆蓋率是否符合預期；樣本數不足時對應區間會先隱藏，避免早期少量樣本產生誤導性統計。⚠️ 兩種方法本身預測的是開盤價，這裡刻意改用收盤價驗證，所以看到的誤差包含了當天開盤後到收盤的盤中變動，不是純粹的開盤價預測誤差。</div>
   <div class="legend" id="accuracy-chart-legend"></div>
   <div class="chart-wrap"><svg id="chart-prediction-accuracy" width="100%" viewBox="0 0 900 160" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-prediction-accuracy"></div></div>
   <div id="accuracy-window-last30">
@@ -448,7 +448,7 @@
     renderMetricsGrid('market-context-grid', mc);
   })();
 
-  // ---- 今日台股開盤價機率預估 ----
+  // ---- 盤前股價預測 ----
   (function(){
     const pred = raw.openPrediction;
     const card = document.getElementById('open-prediction-card');

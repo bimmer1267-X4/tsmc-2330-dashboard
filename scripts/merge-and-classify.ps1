@@ -404,6 +404,9 @@ function Get-PredictedGapPctForTier($Pair, [int]$ModelTier, $Model) {
 # 實際結果一起寫入，標記seeded:true。⚠️ 限制：這幾筆用的是「看過完整1年資料後」擬合出的
 # 係數回推，係數本身有看過這幾天(輕微樣本內偏差)，不是真正blind的即時預測——之後每天
 # 新增的才是真正的即時預測，前端會分開標示。
+# 「準確度」刻意拿收盤價($Pair.actualClose)驗證，不是開盤價($Pair.actualOpen)——雖然「盤前
+# 股價預測」跟「ADR歷史相近價位類比估計」這兩個方法本身預測的目標是開盤價，但這裡改用
+# 當日收盤價當最終驗證基準，誤差/命中率因此包含了開盤後到收盤的盤中變動。
 function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Model) {
     if ($History.Count -gt 0 -or $null -eq $ModelPairs -or $ModelPairs.Count -eq 0) { return @() }
     $count = [math]::Min($AccuracySeedCount, $ModelPairs.Count)
@@ -414,7 +417,7 @@ function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Mod
         $predictedGapPct = [math]::Round((Get-PredictedGapPctForTier $pair $ModelTier $Model), 2)
         $priceAt = { param($gapPct) [math]::Round($pair.prevClose * (1 + $gapPct / 100), 2) }
         $probUpPct = [math]::Round((Get-NormalCdf ($predictedGapPct / $Model.residualStd)) * 100, 1)
-        $actualGapPct = [math]::Round(($pair.actualOpen / $pair.prevClose - 1) * 100, 2)
+        $actualGapPct = [math]::Round(($pair.actualClose / $pair.prevClose - 1) * 100, 2)
         $errorPct = [math]::Round($predictedGapPct - $actualGapPct, 2)
         $ci68 = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $Model.residualStd)); high = (& $priceAt ($predictedGapPct + $Model.residualStd)) }
         $ci95 = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - 1.96 * $Model.residualStd)); high = (& $priceAt ($predictedGapPct + 1.96 * $Model.residualStd)) }
@@ -444,8 +447,8 @@ function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Mod
                 errorPct = $errorPct
                 absErrorPct = [math]::Round([math]::Abs($errorPct), 2)
                 directionHit = ([math]::Sign($predictedGapPct) -eq [math]::Sign($actualGapPct))
-                withinCi68 = ($pair.actualOpen -ge $ci68.low -and $pair.actualOpen -le $ci68.high)
-                withinCi95 = ($pair.actualOpen -ge $ci95.low -and $pair.actualOpen -le $ci95.high)
+                withinCi68 = ($pair.actualClose -ge $ci68.low -and $pair.actualClose -le $ci68.high)
+                withinCi95 = ($pair.actualClose -ge $ci95.low -and $pair.actualClose -le $ci95.high)
                 resolvedAt = $now
             }
         }
@@ -475,7 +478,10 @@ function Update-PredictionAccuracyHistory($TwDaily, $NewEntry) {
         if ($null -ne $entry.actual) { continue }
         if (-not $twByDate.ContainsKey($entry.date)) { continue }
         $day = $twByDate[$entry.date]
-        $actualGapPct = [math]::Round(($day.open / $entry.basisPrevClose - 1) * 100, 2)
+        # 用當日收盤價驗證(不是開盤價)：「盤前股價預測」跟「ADR歷史相近價位類比估計」預測的
+        # 目標都是開盤價，但這裡改用收盤價當最終驗證基準，所以誤差/命中率會包含開盤後到收盤
+        # 的盤中變動，不是純粹的開盤價預測誤差；open/close兩個原始值都照樣存起來供參考。
+        $actualGapPct = [math]::Round(($day.close / $entry.basisPrevClose - 1) * 100, 2)
         $errorPct = [math]::Round($entry.predictedGapPct - $actualGapPct, 2)
         $resolvedAt = (Get-Date).ToUniversalTime().ToString("o")
         $entry.actual = [PSCustomObject]@{
@@ -485,8 +491,8 @@ function Update-PredictionAccuracyHistory($TwDaily, $NewEntry) {
             errorPct = $errorPct
             absErrorPct = [math]::Round([math]::Abs($errorPct), 2)
             directionHit = ([math]::Sign($entry.predictedGapPct) -eq [math]::Sign($actualGapPct))
-            withinCi68 = ($day.open -ge $entry.ci68.low -and $day.open -le $entry.ci68.high)
-            withinCi95 = ($day.open -ge $entry.ci95.low -and $day.open -le $entry.ci95.high)
+            withinCi68 = ($day.close -ge $entry.ci68.low -and $day.close -le $entry.ci68.high)
+            withinCi95 = ($day.close -ge $entry.ci95.low -and $day.close -le $entry.ci95.high)
             resolvedAt = $resolvedAt
         }
         # 「ADR歷史相近價位類比估計」是另一種獨立估計法(不是OLS模型)，同一天有記錄到的話
