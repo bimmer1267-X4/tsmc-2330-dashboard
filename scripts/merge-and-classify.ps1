@@ -4,6 +4,8 @@
   並依「估值分區框架」計算目前價格所屬區間：便宜價／甜甜價／正常／超貴價。
   同時用近6個月 ADR/匯率/台股歷史資料訓練「ADR隔夜漲跌% → 台股開盤缺口%」OLS迴歸，
   套用在今天的ADR變動上，機率性推估台股開盤價（含68%/95%信賴區間、上漲機率）。
+  另外會把ADR溢價率逐日累積寫進 data\adr-premium-history.json（永久保留，不像
+  data.json只留近6個月滾動視窗），供未來回測溢價率對開盤缺口是否有額外預測力。
 
   用法（手動交叉比對）：
     .\merge-and-classify.ps1 -AdrPrice 424.61 -AdrChangePct 5.55 -AdrQuoteTime "2026-07-21T16:00:00-04:00" `
@@ -24,6 +26,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RegressionWindowMonths = 6
 $MinRegressionSamples = 20
+$PremiumHistoryPath = Join-Path $PSScriptRoot "..\data\adr-premium-history.json"
 
 # 抓取 Yahoo Finance 每日收盤序列。除了回傳最新報價(price/changePct/quoteTime)，也回傳
 # 完整每日收盤序列(Series)，供「ADR vs 開盤缺口」迴歸訓練使用，避免重複發送請求。
@@ -104,6 +107,47 @@ function Find-NearestOnOrBefore($map, [string[]]$sortedDates, [string]$date) {
     }
     if ($null -eq $ans) { return $null }
     return $map[$ans]
+}
+
+# ADR溢價率歷史序列，永久保留、逐日累積（不像data.json的daily只保留近6個月滾動視窗，
+# 這份會一直長下去），供未來回測「溢價率相對自身歷史均值的偏離，對台股開盤缺口是否有
+# 額外預測力」使用。每次執行都用當次抓到的近6個月ADR/匯率序列，對這6個月內每一個台股
+# 交易日重新算一次溢價率、寫回(upsert)到歷史檔——範圍外、已經寫進歷史檔的舊資料完全不動。
+function Update-AdrPremiumHistory($TwDaily, $AdrDaily, $FxDaily, [double]$Ratio) {
+    if ($null -eq $AdrDaily -or $null -eq $FxDaily) {
+        Write-Host "ADR/匯率歷史序列缺失，略過ADR溢價率歷史紀錄更新"
+        return
+    }
+    $history = @()
+    if (Test-Path $PremiumHistoryPath) {
+        try { $history = @(Get-Content $PremiumHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+        catch { $history = @() }
+    }
+    $byDate = @{}
+    foreach ($h in $history) { $byDate[$h.date] = $h }
+
+    $adrMap = @{}; foreach ($s in $AdrDaily.series) { $adrMap[$s.date] = $s.close }
+    $adrDates = @($AdrDaily.series | ForEach-Object { $_.date } | Sort-Object)
+    $fxMap = @{}; foreach ($s in $FxDaily.series) { $fxMap[$s.date] = $s.close }
+    $fxDates = @($FxDaily.series | ForEach-Object { $_.date } | Sort-Object)
+
+    $touched = 0
+    foreach ($day in $TwDaily) {
+        $adrClose = Find-NearestOnOrBefore $adrMap $adrDates $day.date
+        $fx = Find-NearestOnOrBefore $fxMap $fxDates $day.date
+        if ($null -eq $adrClose -or $null -eq $fx) { continue }
+        $impliedTwd = [math]::Round(($adrClose / $Ratio) * $fx, 2)
+        $premiumPct = [math]::Round((($impliedTwd - $day.close) / $day.close) * 100, 2)
+        $byDate[$day.date] = [PSCustomObject]@{
+            date = $day.date; twClose = $day.close; adrClose = $adrClose; usdTwd = $fx
+            adrRatio = $Ratio; impliedTwd = $impliedTwd; premiumPct = $premiumPct
+        }
+        $touched++
+    }
+
+    $merged = @($byDate.Values | Sort-Object date)
+    $merged | ConvertTo-Json -Depth 4 -Compress | Out-File -FilePath $PremiumHistoryPath -Encoding utf8
+    Write-Host "已更新ADR溢價率歷史紀錄: $PremiumHistoryPath（累計 $($merged.Count) 筆，本次範圍內更新 $touched 筆）"
 }
 
 # 用近6個月 ADR(TSM)/USD-TWD/台股日K，訓練「ADR單日漲跌% → 台股隔日開盤缺口%」OLS迴歸。
@@ -249,6 +293,8 @@ if ($adrDaily) {
     $adrSixMonthHighUsd = [math]::Round(($adrDaily.series | Measure-Object -Property close -Maximum).Maximum, 2)
     $d | Add-Member -NotePropertyName adrSixMonthHighUsd -NotePropertyValue $adrSixMonthHighUsd -Force
 }
+
+Update-AdrPremiumHistory $d.daily $adrDaily $fxDaily $AdrRatio
 
 $impliedTwd = [math]::Round(($AdrPrice / $AdrRatio) * $UsdTwd, 2)
 $premiumPct = [math]::Round((($impliedTwd - $d.valuation.closePrice) / $d.valuation.closePrice) * 100, 2)
