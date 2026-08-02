@@ -94,14 +94,24 @@ $valuation = [PSCustomObject]@{
 }
 
 Write-Host "[3/4] 抓取最新季度EPS (t187ap14_L)..."
-$epsResp = Invoke-TwseJson "https://openapi.twse.com.tw/v1/opendata/t187ap14_L"
-$epsRow = $epsResp | Where-Object { $_.公司代號 -eq $StockNo } | Select-Object -First 1
-$epsInfo = [PSCustomObject]@{
-    year    = $epsRow.年度
-    season  = $epsRow.季別
-    eps     = ConvertTo-Num $epsRow.'基本每股盈餘(元)'
-    revenue = ConvertTo-Num $epsRow.營業收入
-    netIncome = ConvertTo-Num $epsRow.稅後淨利
+# 季度EPS只用來算「全年預估EPS估值」卡片，不是股價/K線/技術指標這些核心資料。
+# t187ap14_L是「當季」彙總表，換季空窗期可能暫時查不到2330，這種情況不該讓
+# 整條pipeline失敗、連帶擋下當天原本抓得到的股價資料——抓不到就讓$epsInfo
+# 維持$null，讓後續官方預估區塊照既有邏輯優雅地略過即可。
+$epsInfo = $null
+try {
+    $epsResp = Invoke-TwseJson "https://openapi.twse.com.tw/v1/opendata/t187ap14_L"
+    $epsRow = $epsResp | Where-Object { $_.公司代號 -eq $StockNo } | Select-Object -First 1
+    if (-not $epsRow) { throw "t187ap14_L 查無2330資料" }
+    $epsInfo = [PSCustomObject]@{
+        year    = $epsRow.年度
+        season  = $epsRow.季別
+        eps     = ConvertTo-Num $epsRow.'基本每股盈餘(元)'
+        revenue = ConvertTo-Num $epsRow.營業收入
+        netIncome = ConvertTo-Num $epsRow.稅後淨利
+    }
+} catch {
+    Write-Host "  季度EPS抓取失敗，epsInfo維持null: $($_.Exception.Message)"
 }
 
 Write-Host "[4/4] 計算技術指標..."
