@@ -2,9 +2,10 @@
   合併 ADR / 匯率資料（由 Claude 透過 WebFetch 交叉比對兩來源後取得；若省略參數則自動
   改用 Yahoo Finance 單一來源抓取，供排程自動化使用）進 data.json，
   並依「估值分區框架」計算目前價格所屬區間：便宜價／甜甜價／正常／超貴價。
-  同時用近1年 ADR/匯率/台股歷史資料訓練「ADR隔夜漲跌% + ADR溢價偏離%」雙變數OLS迴歸，
-  套用在今天的ADR變動與溢價狀態上，機率性推估台股開盤價（含68%/95%信賴區間、上漲機率、
-  模型信心指數＝調整後R²）。套牢價、ADR歷史相近價位類比估計這兩個既有功能仍只看近6個月。
+  同時用近1年 ADR/匯率/台股歷史資料訓練「ADR隔夜漲跌% + ADR溢價偏離% + ADR歷史相近價位
+  類比估計缺口%」三變數OLS迴歸，套用在今天的ADR變動/溢價狀態/類比估計上，機率性推估
+  台股開盤價（含68%/95%信賴區間、上漲機率、模型信心指數＝調整後R²）。套牢價、ADR歷史
+  相近價位類比估計卡片本身這兩個既有功能仍只看近6個月。
   另外會把ADR溢價率逐日累積寫進 data\adr-premium-history.json（永久保留，不像
   data.json只留近6個月滾動視窗），是雙變數迴歸模型的訓練資料來源之一。
 
@@ -31,6 +32,7 @@ $ErrorActionPreference = "Stop"
 $RegressionWindowMonths = 12
 $MinRegressionSamples = 20
 $MinRegressionSamplesV2 = 60
+$MinRegressionSamplesV3 = 80
 $PremiumRollWindowDays = 60
 $PremiumHistoryPath = Join-Path $PSScriptRoot "..\data\adr-premium-history.json"
 
@@ -134,6 +136,74 @@ function Get-OlsRegression2([double[]]$xs1, [double[]]$xs2, [double[]]$ys) {
         seB1 = $seB1; seB2 = $seB2; tB1 = $tB1; tB2 = $tB2; pB1 = $pB1; pB2 = $pB2
     }
 }
+# 高斯-喬丹消去法求反矩陣，供 Get-OlsRegressionN 算 (X'X)⁻¹ 用。
+function Get-InvertMatrix($M) {
+    $p = $M.Count
+    $A = New-Object 'object[,]' $p, (2 * $p)
+    for ($i = 0; $i -lt $p; $i++) {
+        for ($j = 0; $j -lt $p; $j++) { $A[$i, $j] = $M[$i][$j] }
+        for ($j = 0; $j -lt $p; $j++) { $A[$i, $p + $j] = if ($i -eq $j) { 1.0 } else { 0.0 } }
+    }
+    for ($col = 0; $col -lt $p; $col++) {
+        $pivot = $col
+        for ($r = $col + 1; $r -lt $p; $r++) { if ([math]::Abs($A[$r, $col]) -gt [math]::Abs($A[$pivot, $col])) { $pivot = $r } }
+        if ($pivot -ne $col) {
+            for ($c = 0; $c -lt 2 * $p; $c++) { $tmp = $A[$col, $c]; $A[$col, $c] = $A[$pivot, $c]; $A[$pivot, $c] = $tmp }
+        }
+        $pv = $A[$col, $col]
+        for ($c = 0; $c -lt 2 * $p; $c++) { $A[$col, $c] = $A[$col, $c] / $pv }
+        for ($r = 0; $r -lt $p; $r++) {
+            if ($r -eq $col) { continue }
+            $f = $A[$r, $col]
+            for ($c = 0; $c -lt 2 * $p; $c++) { $A[$r, $c] = $A[$r, $c] - $f * $A[$col, $c] }
+        }
+    }
+    $inv = New-Object 'object[,]' $p, $p
+    for ($i = 0; $i -lt $p; $i++) { for ($j = 0; $j -lt $p; $j++) { $inv[$i, $j] = $A[$i, $p + $j] } }
+    return $inv
+}
+
+# 通用矩陣版 OLS（任意變數數，含截距），用於三變數模型（開盤缺口% ~ ADR漲跌% + 溢價偏離%
+# + ADR歷史相近價位類比估計缺口%）。Get-OlsRegression/Get-OlsRegression2 是手推的封閉解，
+# 只適用剛好1或2個變數；再加第3個變數硬推封閉解會變得很繁瑣，改用矩陣運算(X為n×p設計
+# 矩陣，第一欄全為1即截距)的話不管未來加幾個變數都是同一套邏輯，不用每次重新手推公式。
+# X: 每列是[1, x1, x2, ...]；y: 目標值陣列。回傳係數/標準誤/t值/p值都是跟X欄位順序對齊的陣列。
+function Get-OlsRegressionN($X, [double[]]$y) {
+    $n = $X.Count; $p = $X[0].Count
+    $XtX = New-Object 'double[][]' $p
+    for ($a = 0; $a -lt $p; $a++) { $XtX[$a] = New-Object double[] $p }
+    $Xty = New-Object double[] $p
+    for ($i = 0; $i -lt $n; $i++) {
+        for ($a = 0; $a -lt $p; $a++) {
+            $Xty[$a] += $X[$i][$a] * $y[$i]
+            for ($b = 0; $b -lt $p; $b++) { $XtX[$a][$b] += $X[$i][$a] * $X[$i][$b] }
+        }
+    }
+    $inv = Get-InvertMatrix $XtX
+    $beta = New-Object double[] $p
+    for ($a = 0; $a -lt $p; $a++) { for ($b = 0; $b -lt $p; $b++) { $beta[$a] += $inv[$a, $b] * $Xty[$b] } }
+
+    $my = Get-Mean $y
+    $ssRes = 0.0; $ssTot = 0.0
+    for ($i = 0; $i -lt $n; $i++) {
+        $pred = 0.0
+        for ($a = 0; $a -lt $p; $a++) { $pred += $beta[$a] * $X[$i][$a] }
+        $ssRes += ($y[$i] - $pred) * ($y[$i] - $pred)
+        $ssTot += ($y[$i] - $my) * ($y[$i] - $my)
+    }
+    $r2 = 1 - $ssRes / $ssTot
+    $dof = $n - $p
+    $sigma2 = $ssRes / $dof
+    $se = New-Object double[] $p
+    for ($a = 0; $a -lt $p; $a++) { $se[$a] = [math]::Sqrt($sigma2 * $inv[$a, $a]) }
+    $t = New-Object double[] $p
+    $pval = New-Object double[] $p
+    for ($a = 0; $a -lt $p; $a++) { $t[$a] = $beta[$a] / $se[$a]; $pval[$a] = 2 * (1 - (Get-NormalCdf ([math]::Abs($t[$a])))) }
+    $adjR2 = 1 - (1 - $r2) * ($n - 1) / $dof
+
+    return [PSCustomObject]@{ beta = $beta; se = $se; t = $t; p = $pval; r2 = $r2; adjR2 = $adjR2; n = $n; dof = $dof }
+}
+
 # 標準常態分布 CDF（Abramowitz & Stegun 7.1.26 近似），把「預估缺口% / 殘差標準差」換算成機率。
 function Get-Erf([double]$x) {
     $sign = if ($x -lt 0) { -1 } else { 1 }
@@ -433,6 +503,75 @@ function Get-AnalogMatches($todayAdrPrice, $adrSeries, $fxSeries, $twDaily) {
     return [PSCustomObject]@{ tolerancePct = $usedTolerance; todayAdrPrice = [math]::Round($todayAdrPrice, 2); matches = $best; avgTwOpen = $avgTwOpen; count = $best.Count }
 }
 
+# 三變數版本：「ADR單日漲跌% + ADR溢價率偏離近期均值 + ADR歷史相近價位類比估計缺口%」
+# → 台股隔日開盤缺口%。前兩個變數的配對邏輯跟Get-OpenGapModelV2完全一致；第三個變數
+# 直接重用Get-AnalogMatches——正式上線時這個函式也是拿同一套邏輯算「今天」的類比估計，
+# 這裡只是把它套用在每一個歷史配對(D, T)上，差別只在於：傳進去的AdrSeries/FxSeries要
+# 裁到只剩「D當時或更早」的資料，TwDaily要裁到只剩「早於T」的資料，確保每個歷史訓練
+# 樣本都只用到「當時已經知道」的資訊，不會用T自己的開盤價回頭去比對自己(look-ahead bias)。
+function Get-OpenGapModelV3($adrSeries, $fxSeries, $twDaily, $PremiumHistory, [int]$RollWindowDays) {
+    $adrMap = @{}; foreach ($s in $adrSeries) { $adrMap[$s.date] = $s.close }
+    $adrDates = @($adrSeries | ForEach-Object { $_.date })
+    $fxMap = @{}; foreach ($s in $fxSeries) { $fxMap[$s.date] = $s.close }
+    $fxDates = @($fxSeries | ForEach-Object { $_.date } | Sort-Object)
+
+    $premiumSorted = @($PremiumHistory | Sort-Object date)
+    $premiumByDate = @{}; foreach ($h in $premiumSorted) { $premiumByDate[$h.date] = $h.premiumPct }
+    $premiumIndexByDate = @{}
+    for ($i = 0; $i -lt $premiumSorted.Count; $i++) { $premiumIndexByDate[$premiumSorted[$i].date] = $i }
+
+    $pairsByTwDate = @{}
+    for ($i = 1; $i -lt $adrDates.Count; $i++) {
+        $D = $adrDates[$i]; $Dprev = $adrDates[$i - 1]
+        $adrClose = $adrMap[$D]; $adrClosePrev = $adrMap[$Dprev]
+        $adrChangePct = ($adrClose / $adrClosePrev - 1) * 100
+
+        $fx = Find-NearestOnOrBefore $fxMap $fxDates $D
+        if ($null -eq $fx) { continue }
+
+        $tIdx = -1
+        for ($j = 0; $j -lt $twDaily.Count; $j++) {
+            if ($twDaily[$j].date -gt $D) { $tIdx = $j; break }
+        }
+        if ($tIdx -le 0) { continue }
+        $T = $twDaily[$tIdx]; $Tprev = $twDaily[$tIdx - 1]
+        $twOpenGapPct = ($T.open / $Tprev.close - 1) * 100
+
+        if (-not $premiumIndexByDate.ContainsKey($Tprev.date)) { continue }
+        $pIdx = $premiumIndexByDate[$Tprev.date]
+        $windowStart = [math]::Max(0, $pIdx - $RollWindowDays + 1)
+        $window = @($premiumSorted[$windowStart..$pIdx] | ForEach-Object { $_.premiumPct })
+        if ($window.Count -lt [math]::Min($RollWindowDays, 20)) { continue }
+        $rollMean = Get-Mean $window
+        $premiumDev = $premiumByDate[$Tprev.date] - $rollMean
+
+        $adrTrunc = @($adrSeries | Where-Object { $_.date -le $D })
+        $fxTrunc = @($fxSeries | Where-Object { $_.date -le $D })
+        $twTrunc = @($twDaily | Where-Object { $_.date -lt $T.date })
+        $analog = Get-AnalogMatches $adrClose $adrTrunc $fxTrunc $twTrunc
+        if ($null -eq $analog) { continue }
+        $analogGapPct = ($analog.avgTwOpen / $Tprev.close - 1) * 100
+
+        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; premiumDev = $premiumDev; analogGapPct = $analogGapPct; twOpenGapPct = $twOpenGapPct }
+    }
+
+    $uniq = @($pairsByTwDate.Values)
+    if ($uniq.Count -lt $MinRegressionSamplesV3) { return $null }
+
+    $X = @($uniq | ForEach-Object { , @(1.0, $_.adrChangePct, $_.premiumDev, $_.analogGapPct) })
+    $y = @($uniq | ForEach-Object { $_.twOpenGapPct })
+    $reg = Get-OlsRegressionN $X $y
+    $residuals = @($uniq | ForEach-Object { $_.twOpenGapPct - ($reg.beta[0] + $reg.beta[1] * $_.adrChangePct + $reg.beta[2] * $_.premiumDev + $reg.beta[3] * $_.analogGapPct) })
+    $residualStd = Get-StdDev $residuals
+    $hitCount = @($uniq | Where-Object { [math]::Sign($_.adrChangePct) -eq [math]::Sign($_.twOpenGapPct) -and $_.adrChangePct -ne 0 }).Count
+    $hitRate = $hitCount / $uniq.Count
+
+    return [PSCustomObject]@{
+        beta = $reg.beta; se = $reg.se; t = $reg.t; p = $reg.p; r2 = $reg.r2; adjR2 = $reg.adjR2; n = $reg.n
+        residualStd = $residualStd; hitRate = $hitRate
+    }
+}
+
 $sources = @("stockanalysis.com", "finance.yahoo.com")
 $fxSource = "tw.stock.yahoo.com USDTWD=X"
 
@@ -618,52 +757,116 @@ if (Test-Path $configPath) {
     $d | Add-Member -NotePropertyName officialForecast -NotePropertyValue $officialForecast -Force
 }
 
-# ---- 台股開盤價機率預估（依近1年「ADR漲跌% + ADR溢價偏離%」雙變數迴歸模型） ----
-# 優先用雙變數模型；如果溢價歷史還不夠長(移動平均暖機期、樣本數不足MinRegressionSamplesV2)
-# 就退回只用ADR漲跌%的單變數模型，不要整張卡片直接消失。這個退回路徑理論上只有在資料
-# 還在累積的最初期間才會用到，這次1年回填後樣本數已經足夠，正常情況下應該都會走雙變數模型。
+# ---- 台股開盤價機率預估 ----
+# 三層退回：優先用三變數模型(ADR漲跌% + 溢價偏離% + ADR歷史相近價位類比估計缺口%)；
+# 樣本數不足(MinRegressionSamplesV3)或今天剛好找不到任何類比比對時，退回只帶溢價偏離的
+# 雙變數模型；溢價歷史也不夠長的話再退回僅ADR漲跌%的單變數模型。不管哪一層都不讓卡片
+# 直接消失——這些退回路徑理論上只有在資料還在累積的最初期間才會用到，1年回填後樣本數
+# 已經足夠，正常情況下應該都會走三變數模型。
 $openPrediction = $null
 if ($adrDaily -and $fxDaily) {
-    try {
-        $twForModel = if ($twDaily1y.Count -gt 0) { $twDaily1y } else { $d.daily }
-        $model2 = if ($twDaily1y.Count -gt 0) { Get-OpenGapModelV2 $adrDaily.series $fxDaily.series $twDaily1y $premiumHistory $PremiumRollWindowDays } else { $null }
+    $predicted = $false
+    $twForModel = if ($twDaily1y.Count -gt 0) { $twDaily1y } else { $d.daily }
 
-        if ($model2) {
+    try {
+        $model3 = if ($twDaily1y.Count -gt 0) { Get-OpenGapModelV3 $adrDaily.series $fxDaily.series $twDaily1y $premiumHistory $PremiumRollWindowDays } else { $null }
+        # 「今天」的類比估計缺口%要用跟訓練時同一套函式(Get-AnalogMatches)、同一份完整
+        # 1年序列現算，這樣訓練特徵跟預測當下用的特徵才是同一種算法，不會兩邊邏輯不一致。
+        $analogNow = if ($model3) { Get-AnalogMatches $AdrPrice $adrDaily.series $fxDaily.series $twDaily1y } else { $null }
+
+        if ($model3 -and $analogNow) {
             $premiumSorted = @($premiumHistory | Sort-Object date)
             $latestPremium = $premiumSorted[-1]
             $rollStart = [math]::Max(0, $premiumSorted.Count - $PremiumRollWindowDays)
             $rollWindow = @($premiumSorted[$rollStart..($premiumSorted.Count - 1)] | ForEach-Object { $_.premiumPct })
             $premiumDevNow = $latestPremium.premiumPct - (Get-Mean $rollWindow)
-
-            $predictedGapPct = $model2.b0 + $model2.b1 * $AdrChangePct + $model2.b2 * $premiumDevNow
             $base = $d.valuation.closePrice
+            $analogGapNowPct = ($analogNow.avgTwOpen / $base - 1) * 100
+
+            $b0 = $model3.beta[0]; $b1 = $model3.beta[1]; $b2 = $model3.beta[2]; $b3 = $model3.beta[3]
+            $predictedGapPct = $b0 + $b1 * $AdrChangePct + $b2 * $premiumDevNow + $b3 * $analogGapNowPct
             $priceAt = { param($gapPct) [math]::Round($base * (1 + $gapPct / 100), 2) }
-            $probUpPct = [math]::Round((Get-NormalCdf ($predictedGapPct / $model2.residualStd)) * 100, 1)
-            $confidenceIndexPct = [math]::Round(([math]::Max(0, $model2.adjR2)) * 100, 1)
+            $probUpPct = [math]::Round((Get-NormalCdf ($predictedGapPct / $model3.residualStd)) * 100, 1)
+            $confidenceIndexPct = [math]::Round(([math]::Max(0, $model3.adjR2)) * 100, 1)
 
             $openPrediction = [PSCustomObject]@{
                 predictedGapPct = [math]::Round($predictedGapPct, 2)
                 predictedOpen   = (& $priceAt $predictedGapPct)
-                ci68            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $model2.residualStd)); high = (& $priceAt ($predictedGapPct + $model2.residualStd)) }
-                ci95            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - 1.96 * $model2.residualStd)); high = (& $priceAt ($predictedGapPct + 1.96 * $model2.residualStd)) }
+                ci68            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $model3.residualStd)); high = (& $priceAt ($predictedGapPct + $model3.residualStd)) }
+                ci95            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - 1.96 * $model3.residualStd)); high = (& $priceAt ($predictedGapPct + 1.96 * $model3.residualStd)) }
                 probUpPct       = $probUpPct
                 basisAdrChangePct = $AdrChangePct
                 basisPremiumDevPct = [math]::Round($premiumDevNow, 2)
+                basisAnalogGapPct = [math]::Round($analogGapNowPct, 2)
                 basisPrevClose  = $base
                 model           = [PSCustomObject]@{
-                    method = "OLS雙變數迴歸（開盤缺口% ~ ADR漲跌% + 溢價偏離%）"
-                    interceptB0 = [math]::Round($model2.b0, 4); adrChangeCoefB1 = [math]::Round($model2.b1, 4); premiumDevCoefB2 = [math]::Round($model2.b2, 4)
-                    r2 = [math]::Round($model2.r2, 4); adjR2 = [math]::Round($model2.adjR2, 4)
-                    tAdrChange = [math]::Round($model2.tB1, 2); tPremiumDev = [math]::Round($model2.tB2, 2)
-                    pAdrChange = [math]::Round($model2.pB1, 4); pPremiumDev = [math]::Round($model2.pB2, 4)
-                    residualStd = [math]::Round($model2.residualStd, 4); hitRatePct = [math]::Round($model2.hitRate * 100, 1)
-                    sampleSize = $model2.n; windowMonths = $RegressionWindowMonths; premiumRollWindowDays = $PremiumRollWindowDays
+                    method = "OLS三變數迴歸（開盤缺口% ~ ADR漲跌% + 溢價偏離% + ADR歷史相近價位類比估計缺口%）"
+                    interceptB0 = [math]::Round($b0, 4); adrChangeCoefB1 = [math]::Round($b1, 4); premiumDevCoefB2 = [math]::Round($b2, 4); analogGapCoefB3 = [math]::Round($b3, 4)
+                    r2 = [math]::Round($model3.r2, 4); adjR2 = [math]::Round($model3.adjR2, 4)
+                    tAdrChange = [math]::Round($model3.t[1], 2); tPremiumDev = [math]::Round($model3.t[2], 2); tAnalogGap = [math]::Round($model3.t[3], 2)
+                    pAdrChange = [math]::Round($model3.p[1], 4); pPremiumDev = [math]::Round($model3.p[2], 4); pAnalogGap = [math]::Round($model3.p[3], 4)
+                    residualStd = [math]::Round($model3.residualStd, 4); hitRatePct = [math]::Round($model3.hitRate * 100, 1)
+                    sampleSize = $model3.n; windowMonths = $RegressionWindowMonths; premiumRollWindowDays = $PremiumRollWindowDays
+                    analogTolerancePct = $analogNow.tolerancePct
                     confidenceIndexPct = $confidenceIndexPct
                 }
             }
             $d | Add-Member -NotePropertyName openPrediction -NotePropertyValue $openPrediction -Force
-            Write-Host "開盤價機率預估(雙變數): 缺口$($openPrediction.predictedGapPct)%  預估開盤價$($openPrediction.predictedOpen)  上漲機率$($probUpPct)%（調整後R²=$([math]::Round($model2.adjR2,3)), n=$($model2.n), 溢價偏離t值=$([math]::Round($model2.tB2,2))）"
-        } else {
+            $predicted = $true
+            Write-Host "開盤價機率預估(三變數): 缺口$($openPrediction.predictedGapPct)%  預估開盤價$($openPrediction.predictedOpen)  上漲機率$($probUpPct)%（調整後R²=$([math]::Round($model3.adjR2,3)), n=$($model3.n), 類比缺口t值=$([math]::Round($model3.t[3],2))）"
+        }
+    } catch {
+        Write-Warning "三變數開盤價機率預估計算失敗，將嘗試雙變數版本: $($_.Exception.Message)"
+    }
+
+    if (-not $predicted) {
+        try {
+            $model2 = if ($twDaily1y.Count -gt 0) { Get-OpenGapModelV2 $adrDaily.series $fxDaily.series $twDaily1y $premiumHistory $PremiumRollWindowDays } else { $null }
+
+            if ($model2) {
+                $premiumSorted = @($premiumHistory | Sort-Object date)
+                $latestPremium = $premiumSorted[-1]
+                $rollStart = [math]::Max(0, $premiumSorted.Count - $PremiumRollWindowDays)
+                $rollWindow = @($premiumSorted[$rollStart..($premiumSorted.Count - 1)] | ForEach-Object { $_.premiumPct })
+                $premiumDevNow = $latestPremium.premiumPct - (Get-Mean $rollWindow)
+
+                $predictedGapPct = $model2.b0 + $model2.b1 * $AdrChangePct + $model2.b2 * $premiumDevNow
+                $base = $d.valuation.closePrice
+                $priceAt = { param($gapPct) [math]::Round($base * (1 + $gapPct / 100), 2) }
+                $probUpPct = [math]::Round((Get-NormalCdf ($predictedGapPct / $model2.residualStd)) * 100, 1)
+                $confidenceIndexPct = [math]::Round(([math]::Max(0, $model2.adjR2)) * 100, 1)
+
+                $openPrediction = [PSCustomObject]@{
+                    predictedGapPct = [math]::Round($predictedGapPct, 2)
+                    predictedOpen   = (& $priceAt $predictedGapPct)
+                    ci68            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $model2.residualStd)); high = (& $priceAt ($predictedGapPct + $model2.residualStd)) }
+                    ci95            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - 1.96 * $model2.residualStd)); high = (& $priceAt ($predictedGapPct + 1.96 * $model2.residualStd)) }
+                    probUpPct       = $probUpPct
+                    basisAdrChangePct = $AdrChangePct
+                    basisPremiumDevPct = [math]::Round($premiumDevNow, 2)
+                    basisPrevClose  = $base
+                    model           = [PSCustomObject]@{
+                        method = "OLS雙變數迴歸（開盤缺口% ~ ADR漲跌% + 溢價偏離%，類比估計樣本數不足時的退回版本）"
+                        interceptB0 = [math]::Round($model2.b0, 4); adrChangeCoefB1 = [math]::Round($model2.b1, 4); premiumDevCoefB2 = [math]::Round($model2.b2, 4)
+                        r2 = [math]::Round($model2.r2, 4); adjR2 = [math]::Round($model2.adjR2, 4)
+                        tAdrChange = [math]::Round($model2.tB1, 2); tPremiumDev = [math]::Round($model2.tB2, 2)
+                        pAdrChange = [math]::Round($model2.pB1, 4); pPremiumDev = [math]::Round($model2.pB2, 4)
+                        residualStd = [math]::Round($model2.residualStd, 4); hitRatePct = [math]::Round($model2.hitRate * 100, 1)
+                        sampleSize = $model2.n; windowMonths = $RegressionWindowMonths; premiumRollWindowDays = $PremiumRollWindowDays
+                        confidenceIndexPct = $confidenceIndexPct
+                    }
+                }
+                $d | Add-Member -NotePropertyName openPrediction -NotePropertyValue $openPrediction -Force
+                $predicted = $true
+                Write-Host "開盤價機率預估(雙變數退回): 缺口$($openPrediction.predictedGapPct)%  預估開盤價$($openPrediction.predictedOpen)  上漲機率$($probUpPct)%（調整後R²=$([math]::Round($model2.adjR2,3)), n=$($model2.n)）"
+            }
+        } catch {
+            Write-Warning "雙變數開盤價機率預估計算失敗，將嘗試單變數版本: $($_.Exception.Message)"
+        }
+    }
+
+    if (-not $predicted) {
+        try {
             $model = Get-OpenGapModel $adrDaily.series $fxDaily.series $twForModel
             if ($model) {
                 $predictedGapPct = $model.beta * $AdrChangePct + $model.alpha
@@ -680,20 +883,23 @@ if ($adrDaily -and $fxDaily) {
                     basisAdrChangePct = $AdrChangePct
                     basisPrevClose  = $base
                     model           = [PSCustomObject]@{
-                        method = "OLS單變數迴歸（開盤缺口% ~ ADR漲跌%，溢價率樣本數不足時的退回版本）"
+                        method = "OLS單變數迴歸（開盤缺口% ~ ADR漲跌%，溢價率/類比估計樣本數不足時的退回版本）"
                         beta = [math]::Round($model.beta, 4); alpha = [math]::Round($model.alpha, 4); r2 = [math]::Round($model.r2, 4)
                         residualStd = [math]::Round($model.residualStd, 4); hitRatePct = [math]::Round($model.hitRate * 100, 1)
                         sampleSize = $model.n; windowMonths = $RegressionWindowMonths
                     }
                 }
                 $d | Add-Member -NotePropertyName openPrediction -NotePropertyValue $openPrediction -Force
+                $predicted = $true
                 Write-Host "開盤價機率預估(單變數退回): 缺口$($openPrediction.predictedGapPct)%  預估開盤價$($openPrediction.predictedOpen)  上漲機率$($probUpPct)%（R²=$([math]::Round($model.r2,2)), n=$($model.n)）"
-            } else {
-                Write-Warning "雙變數與單變數模型可用樣本數都不足，略過開盤價機率預估"
             }
+        } catch {
+            Write-Warning "開盤價機率預估計算失敗，略過: $($_.Exception.Message)"
         }
-    } catch {
-        Write-Warning "開盤價機率預估計算失敗，略過: $($_.Exception.Message)"
+    }
+
+    if (-not $predicted) {
+        Write-Warning "三/雙/單變數模型可用樣本數皆不足，略過開盤價機率預估"
     }
 }
 
