@@ -964,7 +964,7 @@
   // 缺口%/命中與否只留在tooltip裡當補充資訊。抽成函式讓「開盤價預測準確度追蹤」
   // (完整期間)跟「近30日走勢」(簡化卡片，只裁最近30筆)兩張卡片共用同一套畫法，不用
   // 各自維護一份幾乎一樣的程式碼。
-  function renderPriceTrendChart({ svgId, tooltipId, legendId, series }) {
+  function renderPriceTrendChart({ svgId, tooltipId, legendId, series, markDirectionHit = true }) {
     const svg = document.getElementById(svgId);
     const legend = document.getElementById(legendId);
     if (series.length < 2) {
@@ -1010,11 +1010,15 @@
     drawLine('actualPrice', 'var(--up)', false);
 
     // 收盤價的每個點依方向命中與否上色；種子樣本(回溯試算)用空心點跟即時預測區分。
-    series.forEach((s,i) => {
-      const cx = xs(i), cy = y(s.actualPrice);
-      const color = s.directionHit ? 'var(--good)' : 'var(--critical)';
-      svg.appendChild(el('circle', { cx, cy, r: 3, fill: s.seeded ? 'var(--surface-1)' : color, stroke: color, 'stroke-width': s.seeded ? 1.5 : 0 }));
-    });
+    // markDirectionHit=false時(例如單純看趨勢用的簡化卡片)不畫這些逐點標記，讓三條線
+    // 呈現成跟主K線圖MA5/MA20/MA60一樣乾淨的純折線，不帶「準確度」相關的視覺資訊。
+    if (markDirectionHit) {
+      series.forEach((s,i) => {
+        const cx = xs(i), cy = y(s.actualPrice);
+        const color = s.directionHit ? 'var(--good)' : 'var(--critical)';
+        svg.appendChild(el('circle', { cx, cy, r: 3, fill: s.seeded ? 'var(--surface-1)' : color, stroke: color, 'stroke-width': s.seeded ? 1.5 : 0 }));
+      });
+    }
 
     // x-axis date labels
     const step = Math.max(1, Math.round(m/6));
@@ -1024,7 +1028,8 @@
 
     const legendDefs = [['盤前股價預測','var(--muted)']];
     if (hasAnalog) legendDefs.push(['ADR歷史相近價位','var(--ma5)']);
-    legendDefs.push(['收盤價','var(--up)'],['方向命中','var(--good)'],['方向未命中','var(--critical)']);
+    legendDefs.push(['收盤價','var(--up)']);
+    if (markDirectionHit) legendDefs.push(['方向命中','var(--good)'],['方向未命中','var(--critical)']);
     legendDefs.forEach(([label,color]) => {
       const item = document.createElement('div'); item.className='legend-item';
       const sw = document.createElement('span'); sw.className='legend-swatch'; sw.style.background=color;
@@ -1058,10 +1063,10 @@
       if (s.analogPrice != null) {
         rows.push(['ADR歷史相近價位', fmt(s.analogPrice,0)+' 元', 'var(--ma5)']);
       }
-      rows.push(
-        ['收盤價', fmt(s.actualPrice,0)+' 元', s.directionHit ? 'var(--good)' : 'var(--critical)'],
-        ['方向', s.directionHit ? '命中' : '未命中', null],
-      );
+      rows.push(['收盤價', fmt(s.actualPrice,0)+' 元', markDirectionHit ? (s.directionHit ? 'var(--good)' : 'var(--critical)') : 'var(--up)']);
+      if (markDirectionHit) {
+        rows.push(['方向', s.directionHit ? '命中' : '未命中', null]);
+      }
       rows.forEach(([k,v,color])=>{
         const row = document.createElement('div'); row.className='t-row';
         const kEl = document.createElement('span'); kEl.className='k';
@@ -1083,7 +1088,7 @@
     // 不套用MIN_ACCURACY_SAMPLES門檻——這裡單純畫線，不是統計數字，2個點就能誠實畫出
     // 一條線，不像命中率/誤差那樣在樣本數太少時會有「代表性不足」的疑慮。
     if (!acc || series.length < 2) { if (card) card.style.display = 'none'; return; }
-    renderPriceTrendChart({ svgId: 'chart-price-trend-30d', tooltipId: 'tooltip-price-trend-30d', legendId: 'price-trend-legend-30d', series });
+    renderPriceTrendChart({ svgId: 'chart-price-trend-30d', tooltipId: 'tooltip-price-trend-30d', legendId: 'price-trend-legend-30d', series, markDirectionHit: false });
   })();
 
   // ---- 開盤價預測準確度追蹤 ----
