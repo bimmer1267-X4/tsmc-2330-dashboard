@@ -427,7 +427,16 @@ function predictGapPctForTier(pair, modelTier, model) {
 // 股價預測」跟「ADR歷史相近價位類比估計」這兩個方法本身預測的目標是開盤價，但使用者要
 // 用當日收盤價當作最終驗證基準，所以這裡的誤差/命中率包含了開盤後到收盤的盤中變動，
 // 不是純粹的開盤價預測誤差。open/close兩個原始值都照樣存進actual裡供參考。
-function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model) {
+//
+// analogEstimate(「ADR歷史相近價位類比估計」卡片本身的估計)：直接對每筆種子樣本的日期D，
+// 套用跟那張卡片完全相同的findAnalogMatches()+近6個月窗口(filterSeriesToRecentMonths)，
+// 不是從模型的3rd迴歸變數(pair.analogGapPct，那個用的是1年因果裁切窗口，是模型自己的
+// 訓練特徵，跟卡片本身的6個月窗口不是同一份計算)去反推近似值——用同一套函式、同一套
+// 窗口邏輯，才是「跟卡片當天會顯示的值完全一致」，而不只是模型內部特徵的替代品。這也
+// 不依賴modelTier(V1/V2/V3都能算，跟走哪一層迴歸無關，因為類比估計本來就不是迴歸的
+// 一部分)。adrSeries/fxSeries/twDaily沒有傳入時(理論上不會發生，main()呼叫時一定有)
+// 就整批略過，analogEstimate維持null。
+function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model, adrSeries, fxSeries, twDaily) {
   if (history.length > 0 || !modelPairs || modelPairs.length === 0) return [];
   const seeds = modelPairs.slice(-ACCURACY_SEED_COUNT);
   const now = new Date().toISOString();
@@ -439,6 +448,31 @@ function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model) {
     const errorPct = round(predictedGapPct - actualGapPct, 2);
     const ci68 = { low: priceAt(predictedGapPct - model.residualStd), high: priceAt(predictedGapPct + model.residualStd) };
     const ci95 = { low: priceAt(predictedGapPct - 1.96 * model.residualStd), high: priceAt(predictedGapPct + 1.96 * model.residualStd) };
+
+    let analogEstimate = null;
+    if (adrSeries && fxSeries && twDaily && pair.adrDate) {
+      const adrTrunc = filterSeriesToRecentMonths(adrSeries.filter((s) => s.date <= pair.adrDate), 6);
+      const fxTrunc = filterSeriesToRecentMonths(fxSeries.filter((s) => s.date <= pair.adrDate), 6);
+      const twTrunc = twDaily.filter((t) => t.date < pair.twDate);
+      const analog = findAnalogMatches(pair.adrClose, adrTrunc, fxTrunc, twTrunc);
+      if (analog) {
+        const analogGapPct = round((analog.avgTwOpen / pair.prevClose - 1) * 100, 2);
+        const analogErrorPct = round(analogGapPct - actualGapPct, 2);
+        analogEstimate = {
+          avgTwOpen: analog.avgTwOpen,
+          tolerancePct: analog.tolerancePct,
+          count: analog.count,
+          actual: {
+            analogGapPct,
+            errorPct: analogErrorPct,
+            absErrorPct: round(Math.abs(analogErrorPct), 2),
+            directionHit: Math.sign(analogGapPct) === Math.sign(actualGapPct),
+            resolvedAt: now,
+          },
+        };
+      }
+    }
+
     return {
       date: pair.twDate,
       predictedAt: now,
@@ -455,7 +489,7 @@ function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model) {
       residualStd: round(model.residualStd, 4),
       confidenceIndexPct: modelTier >= 2 ? round(Math.max(0, model.adjR2) * 100, 1) : null,
       seeded: true,
-      analogEstimate: null,
+      analogEstimate,
       actual: {
         open: pair.actualOpen,
         close: pair.actualClose,
@@ -625,7 +659,7 @@ function buildOpenGapModel(adrSeries, fxSeries, twDaily) {
     const T = twDaily[tIdx], Tprev = twDaily[tIdx - 1];
     const twOpenGapPct = (T.open / Tprev.close - 1) * 100;
 
-    pairs.push({ twDate: T.date, adrChangePct, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
+    pairs.push({ twDate: T.date, adrDate: D, adrClose, adrChangePct, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
   }
 
   // 同一台股交易日可能對應多個ADR日期（例如週一對應上週五+週末），只留每個台股交易日最後一筆。
@@ -688,7 +722,7 @@ function buildOpenGapModelV2(adrSeries, fxSeries, twDaily, premiumHistory, rollW
     const rollMean = mean(window);
     const premiumDev = premiumSorted[pIdx].premiumPct - rollMean;
 
-    pairs.push({ twDate: T.date, adrChangePct, premiumDev, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
+    pairs.push({ twDate: T.date, adrDate: D, adrClose, adrChangePct, premiumDev, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
   }
 
   const byTwDate = new Map();
@@ -819,7 +853,7 @@ function buildOpenGapModelV3(adrSeries, fxSeries, twDaily, premiumHistory, rollW
     if (!analog) continue;
     const analogGapPct = (analog.avgTwOpen / Tprev.close - 1) * 100;
 
-    pairs.push({ twDate: T.date, adrChangePct, premiumDev, analogGapPct, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
+    pairs.push({ twDate: T.date, adrDate: D, adrClose, adrChangePct, premiumDev, analogGapPct, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
   }
 
   const byTwDate = new Map();
@@ -1223,7 +1257,7 @@ async function main() {
         // 檔案不存在，視為空歷史
       }
       const seeds = predictionModel
-        ? seedPredictionHistoryIfEmpty(history, predictionModel.pairs, predictionTier, predictionModel)
+        ? seedPredictionHistoryIfEmpty(history, predictionModel.pairs, predictionTier, predictionModel, adrDaily.series, fxDaily.series, twDaily1y)
         : [];
 
       const predictedDateStr = new Date(new Date(d.generatedAt).getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);

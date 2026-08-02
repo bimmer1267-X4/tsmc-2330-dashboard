@@ -407,7 +407,13 @@ function Get-PredictedGapPctForTier($Pair, [int]$ModelTier, $Model) {
 # 「準確度」刻意拿收盤價($Pair.actualClose)驗證，不是開盤價($Pair.actualOpen)——雖然「盤前
 # 股價預測」跟「ADR歷史相近價位類比估計」這兩個方法本身預測的目標是開盤價，但這裡改用
 # 當日收盤價當最終驗證基準，誤差/命中率因此包含了開盤後到收盤的盤中變動。
-function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Model) {
+#
+# analogEstimate(「ADR歷史相近價位類比估計」卡片本身的估計)：直接對每筆種子樣本的日期D，
+# 套用跟那張卡片完全相同的Get-AnalogMatches+近6個月窗口(Get-RecentMonthsSeries)，不是從
+# 模型的3rd迴歸變數($Pair.analogGapPct，那個用的是1年因果裁切窗口，是模型自己的訓練
+# 特徵，跟卡片本身的6個月窗口不是同一份計算)去反推近似值——用同一套函式、同一套窗口
+# 邏輯，才是「跟卡片當天會顯示的值完全一致」。不依賴$ModelTier(V1/V2/V3都能算)。
+function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Model, $AdrSeries, $FxSeries, $TwDaily) {
     if ($History.Count -gt 0 -or $null -eq $ModelPairs -or $ModelPairs.Count -eq 0) { return @() }
     $count = [math]::Min($AccuracySeedCount, $ModelPairs.Count)
     $seeds = @($ModelPairs[($ModelPairs.Count - $count)..($ModelPairs.Count - 1)])
@@ -422,6 +428,30 @@ function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Mod
         $ci68 = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $Model.residualStd)); high = (& $priceAt ($predictedGapPct + $Model.residualStd)) }
         $ci95 = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - 1.96 * $Model.residualStd)); high = (& $priceAt ($predictedGapPct + 1.96 * $Model.residualStd)) }
         $confidenceIndexPct = if ($ModelTier -ge 2) { [math]::Round(([math]::Max(0, $Model.adjR2)) * 100, 1) } else { $null }
+
+        $analogEstimate = $null
+        if ($AdrSeries -and $FxSeries -and $TwDaily -and $pair.adrDate) {
+            $adrTrunc = Get-RecentMonthsSeries (@($AdrSeries | Where-Object { $_.date -le $pair.adrDate })) 6
+            $fxTrunc = Get-RecentMonthsSeries (@($FxSeries | Where-Object { $_.date -le $pair.adrDate })) 6
+            $twTrunc = @($TwDaily | Where-Object { $_.date -lt $pair.twDate })
+            $analog = Get-AnalogMatches $pair.adrClose $adrTrunc $fxTrunc $twTrunc
+            if ($analog) {
+                $analogGapPct = [math]::Round(($analog.avgTwOpen / $pair.prevClose - 1) * 100, 2)
+                $analogErrorPct = [math]::Round($analogGapPct - $actualGapPct, 2)
+                $analogEstimate = [PSCustomObject]@{
+                    avgTwOpen = $analog.avgTwOpen
+                    tolerancePct = $analog.tolerancePct
+                    count = $analog.count
+                    actual = [PSCustomObject]@{
+                        analogGapPct = $analogGapPct
+                        errorPct = $analogErrorPct
+                        absErrorPct = [math]::Round([math]::Abs($analogErrorPct), 2)
+                        directionHit = ([math]::Sign($analogGapPct) -eq [math]::Sign($actualGapPct))
+                        resolvedAt = $now
+                    }
+                }
+            }
+        }
 
         $entry = [PSCustomObject]@{
             date = $pair.twDate
@@ -439,7 +469,7 @@ function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Mod
             residualStd = [math]::Round($Model.residualStd, 4)
             confidenceIndexPct = $confidenceIndexPct
             seeded = $true
-            analogEstimate = $null
+            analogEstimate = $analogEstimate
             actual = [PSCustomObject]@{
                 open = $pair.actualOpen
                 close = $pair.actualClose
@@ -626,7 +656,7 @@ function Get-OpenGapModel($adrSeries, $fxSeries, $twDaily) {
         $twOpenGapPct = ($T.open / $Tprev.close - 1) * 100
 
         # 同一台股交易日可能對應多個ADR日期，只留每個台股交易日最後一筆
-        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
+        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrDate = $D; adrClose = $adrClose; adrChangePct = $adrChangePct; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
     }
 
     $uniq = @($pairsByTwDate.Values)
@@ -687,7 +717,7 @@ function Get-OpenGapModelV2($adrSeries, $fxSeries, $twDaily, $PremiumHistory, [i
         $rollMean = Get-Mean $window
         $premiumDev = $premiumByDate[$Tprev.date] - $rollMean
 
-        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; premiumDev = $premiumDev; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
+        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrDate = $D; adrClose = $adrClose; adrChangePct = $adrChangePct; premiumDev = $premiumDev; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
     }
 
     $uniq = @($pairsByTwDate.Values)
@@ -812,7 +842,7 @@ function Get-OpenGapModelV3($adrSeries, $fxSeries, $twDaily, $PremiumHistory, [i
         if ($null -eq $analog) { continue }
         $analogGapPct = ($analog.avgTwOpen / $Tprev.close - 1) * 100
 
-        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; premiumDev = $premiumDev; analogGapPct = $analogGapPct; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
+        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrDate = $D; adrClose = $adrClose; adrChangePct = $adrChangePct; premiumDev = $premiumDev; analogGapPct = $analogGapPct; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
     }
 
     $uniq = @($pairsByTwDate.Values)
@@ -1203,7 +1233,7 @@ if ($twDaily1y.Count -gt 0) {
             try { $history = @(Get-Content $PredictionHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
             catch { $history = @() }
         }
-        $seeds = if ($predictionModel) { New-PredictionHistorySeeds $history $predictionModel.pairs $predictionTier $predictionModel } else { @() }
+        $seeds = if ($predictionModel) { New-PredictionHistorySeeds $history $predictionModel.pairs $predictionTier $predictionModel $adrDaily.series $fxDaily.series $twDaily1y } else { @() }
 
         # 用DateTimeOffset::Parse明確解析ISO時間字串裡的時區資訊(而不是Get-Date隱含依賴
         # 系統當地文化/時區設定)，確保不論執行環境的系統時區為何，都能正確換算成UTC後
