@@ -100,18 +100,28 @@ async function fetchValuation(daily) {
   throw new Error("BWIBBU_d 回溯5個交易日仍查無資料");
 }
 
+// 季度EPS只用來算「全年預估EPS估值」卡片，不是股價/K線/技術指標這些核心資料。
+// t187ap14_L是「當季」彙總表，每季換新資料時會有幾天空窗期(例如新一季企業
+// 還沒申報完，2330這一列可能暫時不在表裡)，這種情況不該讓整條pipeline失敗、
+// 連帶把當天原本抓得到的股價資料也一起擋下來——所以抓不到就回傳null，讓
+// merge-and-classify.mjs的官方預估區塊照既有邏輯(try/catch)優雅地略過即可。
 async function fetchEpsInfo() {
   console.log("[3/4] 抓取最新季度EPS (t187ap14_L)...");
-  const rows = await fetchJson("https://openapi.twse.com.tw/v1/opendata/t187ap14_L");
-  const row = rows.find((r) => r["公司代號"] === STOCK_NO);
-  if (!row) throw new Error("t187ap14_L 查無2330資料");
-  return {
-    year: row["年度"],
-    season: row["季別"],
-    eps: toNum(row["基本每股盈餘(元)"]),
-    revenue: toNum(row["營業收入"]),
-    netIncome: toNum(row["稅後淨利"]),
-  };
+  try {
+    const rows = await fetchJson("https://openapi.twse.com.tw/v1/opendata/t187ap14_L");
+    const row = rows.find((r) => r["公司代號"] === STOCK_NO);
+    if (!row) throw new Error("t187ap14_L 查無2330資料");
+    return {
+      year: row["年度"],
+      season: row["季別"],
+      eps: toNum(row["基本每股盈餘(元)"]),
+      revenue: toNum(row["營業收入"]),
+      netIncome: toNum(row["稅後淨利"]),
+    };
+  } catch (e) {
+    console.warn(`  季度EPS抓取失敗，epsInfo維持null: ${e.message}`);
+    return null;
+  }
 }
 
 function sma(arr, idx, period) {

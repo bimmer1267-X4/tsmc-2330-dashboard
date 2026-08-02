@@ -345,7 +345,10 @@ async function main() {
   d.technicalFlags = { rsi14: rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60 };
 
   // ---- 官方全年預估EPS（來自 config.json，可請Claude更新） ----
+  // epsInfo可能因t187ap14_L換季空窗期抓不到而是null(見update-dashboard.mjs的
+  // fetchEpsInfo)，這種情況下無法算上半年實際EPS，整個官方預估區塊直接略過。
   try {
+    if (!d.epsInfo) throw new Error("epsInfo為null(季度EPS抓取失敗或換季空窗期)");
     const cfg = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
     const epsFullYear = cfg.forecastEpsFullYear;
 
