@@ -43,7 +43,7 @@ $PredictionHistoryPath = Join-Path $PSScriptRoot "..\data\prediction-accuracy-hi
 # 已解析的紀錄(有界)；資料庫是空檔案時，用最近這麼多個歷史訓練配對回溯種一批初始樣本。
 $MinAccuracySamples = 10
 $AccuracyRecentSeriesLimit = 120
-$AccuracySeedCount = 5
+$AccuracySeedCount = 15
 
 # 抓取 Yahoo Finance 每日收盤序列。除了回傳最新報價(price/changePct/quoteTime)，也回傳
 # 完整每日收盤序列(Series)，供「ADR vs 開盤缺口」迴歸訓練使用，避免重複發送請求。

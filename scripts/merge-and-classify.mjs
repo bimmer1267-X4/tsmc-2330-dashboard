@@ -47,7 +47,7 @@ const PREMIUM_ROLL_WINDOW_DAYS = 60;
 // 資料可看，不用真的等一整週。
 const MIN_ACCURACY_SAMPLES = 10;
 const ACCURACY_RECENT_SERIES_LIMIT = 120;
-const ACCURACY_SEED_COUNT = 5;
+const ACCURACY_SEED_COUNT = 15;
 
 function parseArgs(argv) {
   const out = {};
