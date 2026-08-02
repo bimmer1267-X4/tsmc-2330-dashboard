@@ -4,6 +4,8 @@
 // 以及「全年預估EPS」(config.json) 換算的 Forward PE / PEG 分區。
 // 同時用近6個月 ADR/匯率/台股歷史資料訓練「ADR隔夜漲跌% → 台股開盤缺口%」OLS迴歸，
 // 套用在今天的ADR變動上，機率性推估台股開盤價（含68%/95%信賴區間、上漲機率）。
+// 另外會把ADR溢價率逐日累積寫進 data/adr-premium-history.json（永久保留，不像
+// data.json只留近6個月滾動視窗），供未來回測溢價率對開盤缺口是否有額外預測力。
 // 跨平台版本 (Node.js)，邏輯與 merge-and-classify.ps1 對等。
 //
 // 用法（手動交叉比對）：
@@ -21,6 +23,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = join(__dirname, "..", "data", "data.json");
 const CONFIG_PATH = join(__dirname, "..", "data", "config.json");
+const PREMIUM_HISTORY_PATH = join(__dirname, "..", "data", "adr-premium-history.json");
 const YF_UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
 const REGRESSION_WINDOW = "6mo";
 const REGRESSION_WINDOW_MONTHS = 6;
@@ -131,6 +134,47 @@ function nearestOnOrBefore(map, sortedDates, date) {
     if (sortedDates[mid] <= date) { ans = sortedDates[mid]; lo = mid + 1; } else hi = mid - 1;
   }
   return ans == null ? null : map.get(ans);
+}
+
+// ADR溢價率歷史序列，永久保留、逐日累積（不像data.json.daily只保留近6個月滾動視窗，
+// 這份會一直長下去），供未來回測「溢價率相對自身歷史均值的偏離，對台股開盤缺口是否有
+// 額外預測力」使用。每次執行都用當次抓到的近6個月ADR/匯率序列，對這6個月內每一個台股
+// 交易日重新算一次溢價率、寫回(upsert)到歷史檔——同一天重算的結果理論上會一致(除非
+// Yahoo回補/修正了歷史收盤價)，範圍外、已經寫進歷史檔的舊資料則完全不動，不會被覆蓋
+// 或砍掉。這樣PR合併後第一次在GitHub Actions真正跑起來時，就能一口氣回填近6個月的
+// 資料，不用從零開始每天累積一筆才能拿到足夠回測的樣本數。
+async function updateAdrPremiumHistory(twDaily, adrDaily, fxDaily, adrRatio) {
+  if (!adrDaily || !fxDaily) {
+    console.warn("ADR/匯率歷史序列缺失，略過ADR溢價率歷史紀錄更新");
+    return;
+  }
+  let history = [];
+  try {
+    history = JSON.parse(await readFile(PREMIUM_HISTORY_PATH, "utf8"));
+  } catch {
+    // 檔案不存在(第一次執行)或格式壞掉，視為空歷史，從頭建立
+  }
+  const byDate = new Map(history.map((h) => [h.date, h]));
+
+  const adrMap = adrDaily.map;
+  const adrDates = [...adrMap.keys()].sort();
+  const fxMap = fxDaily.map;
+  const fxDates = [...fxMap.keys()].sort();
+
+  let touched = 0;
+  for (const day of twDaily) {
+    const adrClose = nearestOnOrBefore(adrMap, adrDates, day.date);
+    const fx = nearestOnOrBefore(fxMap, fxDates, day.date);
+    if (adrClose == null || fx == null) continue;
+    const impliedTwd = round((adrClose / adrRatio) * fx, 2);
+    const premiumPct = round(((impliedTwd - day.close) / day.close) * 100, 2);
+    byDate.set(day.date, { date: day.date, twClose: day.close, adrClose, usdTwd: fx, adrRatio, impliedTwd, premiumPct });
+    touched++;
+  }
+
+  const merged = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  await writeFile(PREMIUM_HISTORY_PATH, JSON.stringify(merged), "utf8");
+  console.log(`已更新ADR溢價率歷史紀錄: ${PREMIUM_HISTORY_PATH}（累計 ${merged.length} 筆，本次範圍內更新 ${touched} 筆）`);
 }
 
 // 用近6個月 ADR(TSM)/USD-TWD/台股日K，訓練「ADR單日漲跌% → 台股隔日開盤缺口%」OLS迴歸。
@@ -314,6 +358,8 @@ async function main() {
   if (adrDaily) {
     d.adrSixMonthHighUsd = round(Math.max(...adrDaily.series.map((s) => s.close)), 2);
   }
+
+  await updateAdrPremiumHistory(d.daily, adrDaily, fxDaily, adrRatio);
 
   const impliedTwd = Math.round(((adrPrice / adrRatio) * usdTwd) * 100) / 100;
   const premiumPct = Math.round((((impliedTwd - d.valuation.closePrice) / d.valuation.closePrice) * 100) * 100) / 100;
