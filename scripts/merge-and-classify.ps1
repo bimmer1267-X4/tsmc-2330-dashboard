@@ -356,9 +356,15 @@ function Update-AdrPremiumHistory($TwDaily, $AdrDaily, $FxDaily, [double]$Ratio)
 # 把 $OpenPrediction（三/雙/單變數三種形狀之一）攤平成「開盤價預測準確度追蹤」歷史紀錄
 # 的固定schema。basisPremiumDevPct/basisAnalogGapPct/confidenceIndexPct在單變數(甚至雙
 # 變數)版本可能不存在——PowerShell存取PSCustomObject不存在的屬性會直接回傳$null，效果
-# 跟.mjs版本的 ?? null 一樣，不用另外判斷。
-function New-PredictionHistoryEntry($OpenPrediction, [int]$ModelTier, [string]$PredictedDateStr, [string]$PredictedAt, [bool]$Seeded = $false) {
+# 跟.mjs版本的 ?? null 一樣，不用另外判斷。$AnalogMatches(即$d.adrAnalogMatches，「ADR
+# 歷史相近價位類比估計」卡片本身的資料)是另一個獨立追蹤對象——不是OLS模型的一部分，
+# 是同一張卡片上另一種估計方式，額外存一份analogEstimate，回填時會一併算出這個估計法
+# 自己的誤差/命中率，讓使用者能比較兩種方法誰比較準，不是只看模型。
+function New-PredictionHistoryEntry($OpenPrediction, [int]$ModelTier, [string]$PredictedDateStr, [string]$PredictedAt, [bool]$Seeded = $false, $AnalogMatches = $null) {
     $m = $OpenPrediction.model
+    $analogEstimate = if ($AnalogMatches) {
+        [PSCustomObject]@{ avgTwOpen = $AnalogMatches.avgTwOpen; tolerancePct = $AnalogMatches.tolerancePct; count = $AnalogMatches.count; actual = $null }
+    } else { $null }
     return [PSCustomObject]@{
         date = $PredictedDateStr
         predictedAt = $PredictedAt
@@ -375,6 +381,7 @@ function New-PredictionHistoryEntry($OpenPrediction, [int]$ModelTier, [string]$P
         residualStd = $m.residualStd
         confidenceIndexPct = $m.confidenceIndexPct
         seeded = $Seeded
+        analogEstimate = $analogEstimate
         actual = $null
     }
 }
@@ -469,6 +476,7 @@ function Update-PredictionAccuracyHistory($TwDaily, $NewEntry) {
         $day = $twByDate[$entry.date]
         $actualGapPct = [math]::Round(($day.open / $entry.basisPrevClose - 1) * 100, 2)
         $errorPct = [math]::Round($entry.predictedGapPct - $actualGapPct, 2)
+        $resolvedAt = (Get-Date).ToUniversalTime().ToString("o")
         $entry.actual = [PSCustomObject]@{
             open = $day.open
             close = $day.close
@@ -478,7 +486,22 @@ function Update-PredictionAccuracyHistory($TwDaily, $NewEntry) {
             directionHit = ([math]::Sign($entry.predictedGapPct) -eq [math]::Sign($actualGapPct))
             withinCi68 = ($day.open -ge $entry.ci68.low -and $day.open -le $entry.ci68.high)
             withinCi95 = ($day.open -ge $entry.ci95.low -and $day.open -le $entry.ci95.high)
-            resolvedAt = (Get-Date).ToUniversalTime().ToString("o")
+            resolvedAt = $resolvedAt
+        }
+        # 「ADR歷史相近價位類比估計」是另一種獨立估計法(不是OLS模型)，同一天有記錄到的話
+        # 也一併算出它自己的缺口%/誤差/方向命中，跟模型的準確度分開比較。PowerShell對$null
+        # 取屬性(GET)是安全的會回傳$null，但對$null.屬性做SET會丟例外，所以要先判斷
+        # $entry.analogEstimate存在才能寫入.actual。
+        if ($entry.analogEstimate) {
+            $analogGapPct = [math]::Round(($entry.analogEstimate.avgTwOpen / $entry.basisPrevClose - 1) * 100, 2)
+            $analogErrorPct = [math]::Round($analogGapPct - $actualGapPct, 2)
+            $entry.analogEstimate.actual = [PSCustomObject]@{
+                analogGapPct = $analogGapPct
+                errorPct = $analogErrorPct
+                absErrorPct = [math]::Round([math]::Abs($analogErrorPct), 2)
+                directionHit = ([math]::Sign($analogGapPct) -eq [math]::Sign($actualGapPct))
+                resolvedAt = $resolvedAt
+            }
         }
         $backfilled++
     }
@@ -518,6 +541,20 @@ function Get-PredictionAccuracySummary($History) {
             @($resolved[($resolved.Count - $n)..($resolved.Count - 1)])
         }
         if ($slice.Count -lt $MinAccuracySamples) { $windows[$w.key] = $null; continue }
+
+        # 「ADR歷史相近價位類比估計」是獨立於OLS模型之外的另一種估計法，同一區間內只有
+        # 部分紀錄有這項資料(種子樣本沒有、抓取失敗的日子也可能沒有)，樣本數不足時analog
+        # 欄位整個回傳$null，不勉強算一個代表性不足的統計數字，也不影響模型本身的統計。
+        $analogResolved = @($slice | Where-Object { $_.analogEstimate -and $_.analogEstimate.actual })
+        $analog = if ($analogResolved.Count -lt $MinAccuracySamples) { $null } else {
+            [PSCustomObject]@{
+                sampleSize = $analogResolved.Count
+                directionHitRatePct = [math]::Round((Get-Mean ($analogResolved | ForEach-Object { if ($_.analogEstimate.actual.directionHit) { 100.0 } else { 0.0 } })), 1)
+                meanErrorPct = [math]::Round((Get-Mean ($analogResolved | ForEach-Object { $_.analogEstimate.actual.errorPct })), 2)
+                meanAbsErrorPct = [math]::Round((Get-Mean ($analogResolved | ForEach-Object { $_.analogEstimate.actual.absErrorPct })), 2)
+            }
+        }
+
         $windows[$w.key] = [PSCustomObject]@{
             label = $w.label
             sampleSize = $slice.Count
@@ -526,6 +563,7 @@ function Get-PredictionAccuracySummary($History) {
             meanAbsErrorPct = [math]::Round((Get-Mean ($slice | ForEach-Object { $_.actual.absErrorPct })), 2)
             ci68CoveragePct = [math]::Round((Get-Mean ($slice | ForEach-Object { if ($_.actual.withinCi68) { 100.0 } else { 0.0 } })), 1)
             ci95CoveragePct = [math]::Round((Get-Mean ($slice | ForEach-Object { if ($_.actual.withinCi95) { 100.0 } else { 0.0 } })), 1)
+            analog = $analog
         }
     }
 
@@ -535,11 +573,13 @@ function Get-PredictionAccuracySummary($History) {
 
     $seriesCount = [math]::Min($AccuracyRecentSeriesLimit, $resolved.Count)
     $recentSeries = @($resolved[($resolved.Count - $seriesCount)..($resolved.Count - 1)] | ForEach-Object {
+        $analogGapPct = if ($_.analogEstimate -and $_.analogEstimate.actual) { $_.analogEstimate.actual.analogGapPct } else { $null }
         [PSCustomObject]@{
             date = $_.date
             predictedGapPct = $_.predictedGapPct
             actualGapPct = $_.actual.actualGapPct
             directionHit = $_.actual.directionHit
+            analogGapPct = $analogGapPct
             seeded = ($_.seeded -eq $true)
         }
     })
@@ -1118,12 +1158,30 @@ if ($adrDaily -and $fxDaily) {
     }
 }
 
+# ---- ADR歷史相近價位類比估計 ----
+# 這個區塊要放在「開盤價預測準確度追蹤」之前執行：準確度追蹤要把今天的$analog一併存進
+# 歷史紀錄(供之後也追蹤類比估計本身的準不準)，必須先算出來才能用。
+if ($adrDaily6mo -and $fxDaily6mo) {
+    try {
+        $analog = Get-AnalogMatches $AdrPrice $adrDaily6mo.series $fxDaily6mo.series $d.daily
+        if ($analog) {
+            $d | Add-Member -NotePropertyName adrAnalogMatches -NotePropertyValue $analog -Force
+            Write-Host "歷史相近ADR價位比對: $($analog.count)筆 (±$($analog.tolerancePct)%)  平均對應台股開盤價: $($analog.avgTwOpen)"
+        } else {
+            Write-Warning "近6個月無相近ADR價位可比對，略過類比估計"
+        }
+    } catch {
+        Write-Warning "歷史相近ADR價位比對計算失敗，略過: $($_.Exception.Message)"
+    }
+}
+
 # ---- 開盤價預測準確度追蹤 ----
 # 不論這次是否成功算出新預測，只要有抓到近1年台股日K，就先回填先前未解析的舊紀錄
 # （所以特意放在if ($adrDaily -and $fxDaily)區塊外面，即使ADR/匯率當次抓取失敗，仍然
 # 可以用這次的台股日K把之前累積的未解析紀錄回填掉，不用等到下次ADR恢復正常才回填）；
 # 今天的新預測（若有算出來）另外併入同一次寫檔。資料庫還是空檔案時，先用最近幾筆訓練
-# 配對種一批初始樣本，讓卡片一上線就有資料可看。
+# 配對種一批初始樣本，讓卡片一上線就有資料可看。同時把$analog(若有)一併存進紀錄，讓
+# 「ADR歷史相近價位類比估計」這個既有功能本身的準確度也能被長期追蹤，不是只追蹤OLS模型。
 if ($twDaily1y.Count -gt 0) {
     try {
         $history = @()
@@ -1137,11 +1195,13 @@ if ($twDaily1y.Count -gt 0) {
         # 系統當地文化/時區設定)，確保不論執行環境的系統時區為何，都能正確換算成UTC後
         # +8小時得到台北日期，行為跟.mjs版本(new Date(...).getTime() + 8*3600*1000)一致。
         $predictedDateStr = ([datetimeoffset]::Parse($d.generatedAt)).UtcDateTime.AddHours(8).ToString("yyyy-MM-dd")
-        $newEntry = if ($predicted) { New-PredictionHistoryEntry $openPrediction $predictionTier $predictedDateStr $d.generatedAt } else { $null }
+        $newEntry = if ($predicted) { New-PredictionHistoryEntry $openPrediction $predictionTier $predictedDateStr $d.generatedAt $false $analog } else { $null }
 
         # 種子樣本直接寫進同一份歷史（在Update-PredictionAccuracyHistory做回填/upsert之前），
         # 這樣今天這次執行內，種子樣本也會一併被回填邏輯掃過（雖然種子樣本本來就已經有
-        # actual了，掃過也不會被覆蓋，因為回填邏輯只處理actual為$null的項目）。
+        # actual了，掃過也不會被覆蓋，因為回填邏輯只處理actual為$null的項目）。種子樣本本身
+        # 沒有對應的「當時6個月類比估計」可回溯，所以種子樣本的analogEstimate固定是$null，
+        # 之後每天新增的才會有。
         if ($seeds.Count -gt 0) {
             $history = @($history) + @($seeds)
             $history | ConvertTo-Json -Depth 6 -Compress | Out-File -FilePath $PredictionHistoryPath -Encoding utf8
@@ -1153,21 +1213,6 @@ if ($twDaily1y.Count -gt 0) {
         if ($summary) { $d | Add-Member -NotePropertyName predictionAccuracySummary -NotePropertyValue $summary -Force }
     } catch {
         Write-Warning "開盤價預測準確度歷史紀錄更新失敗，略過: $($_.Exception.Message)"
-    }
-}
-
-# ---- ADR歷史相近價位類比估計 ----
-if ($adrDaily6mo -and $fxDaily6mo) {
-    try {
-        $analog = Get-AnalogMatches $AdrPrice $adrDaily6mo.series $fxDaily6mo.series $d.daily
-        if ($analog) {
-            $d | Add-Member -NotePropertyName adrAnalogMatches -NotePropertyValue $analog -Force
-            Write-Host "歷史相近ADR價位比對: $($analog.count)筆 (±$($analog.tolerancePct)%)  平均對應台股開盤價: $($analog.avgTwOpen)"
-        } else {
-            Write-Warning "近6個月無相近ADR價位可比對，略過類比估計"
-        }
-    } catch {
-        Write-Warning "歷史相近ADR價位比對計算失敗，略過: $($_.Exception.Message)"
     }
 }
 

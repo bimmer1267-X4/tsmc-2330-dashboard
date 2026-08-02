@@ -373,7 +373,11 @@ async function updateAdrPremiumHistory(twDaily, adrDaily, fxDaily, adrRatio) {
 // 把 d.openPrediction（三/雙/單變數三種形狀之一）攤平成「開盤價預測準確度追蹤」歷史紀錄
 // 的固定schema。basisPremiumDevPct/basisAnalogGapPct/confidenceIndexPct在單變數(甚至雙
 // 變數)版本可能不存在，用 ?? null 讓欄位形狀固定，方便之後統一讀取，不用每次判斷是哪一層。
-function buildPredictionHistoryEntry(openPrediction, modelTier, predictedDateStr, predictedAt, seeded = false) {
+// analogMatches(即d.adrAnalogMatches，「ADR歷史相近價位類比估計」卡片本身的資料)是另一
+// 個獨立追蹤對象——不是OLS模型的一部分，是同一張卡片上另一種估計方式，所以額外存一份
+// analogEstimate，回填時會一併算出這個估計法自己的誤差/命中率，讓使用者能比較兩種方法
+// 誰比較準，不是只看模型。
+function buildPredictionHistoryEntry(openPrediction, modelTier, predictedDateStr, predictedAt, seeded = false, analogMatches = null) {
   const m = openPrediction.model;
   return {
     date: predictedDateStr,
@@ -391,6 +395,9 @@ function buildPredictionHistoryEntry(openPrediction, modelTier, predictedDateStr
     residualStd: m.residualStd,
     confidenceIndexPct: m.confidenceIndexPct ?? null,
     seeded,
+    analogEstimate: analogMatches
+      ? { avgTwOpen: analogMatches.avgTwOpen, tolerancePct: analogMatches.tolerancePct, count: analogMatches.count, actual: null }
+      : null,
     actual: null,
   };
 }
@@ -481,6 +488,7 @@ async function updatePredictionAccuracyHistory(twDaily, newEntry) {
     if (!day) continue; // 該日還沒收盤(或不在目前抓到的範圍內)，之後執行再回填
     const actualGapPct = round((day.open / entry.basisPrevClose - 1) * 100, 2);
     const errorPct = round(entry.predictedGapPct - actualGapPct, 2);
+    const resolvedAt = new Date().toISOString();
     entry.actual = {
       open: day.open,
       close: day.close,
@@ -490,8 +498,21 @@ async function updatePredictionAccuracyHistory(twDaily, newEntry) {
       directionHit: Math.sign(entry.predictedGapPct) === Math.sign(actualGapPct),
       withinCi68: day.open >= entry.ci68.low && day.open <= entry.ci68.high,
       withinCi95: day.open >= entry.ci95.low && day.open <= entry.ci95.high,
-      resolvedAt: new Date().toISOString(),
+      resolvedAt,
     };
+    // 「ADR歷史相近價位類比估計」是另一種獨立估計法(不是OLS模型)，同一天有記錄到的話
+    // 也一併算出它自己的缺口%/誤差/方向命中，跟模型的準確度分開比較。
+    if (entry.analogEstimate) {
+      const analogGapPct = round((entry.analogEstimate.avgTwOpen / entry.basisPrevClose - 1) * 100, 2);
+      const analogErrorPct = round(analogGapPct - actualGapPct, 2);
+      entry.analogEstimate.actual = {
+        analogGapPct,
+        errorPct: analogErrorPct,
+        absErrorPct: round(Math.abs(analogErrorPct), 2),
+        directionHit: Math.sign(analogGapPct) === Math.sign(actualGapPct),
+        resolvedAt,
+      };
+    }
     backfilled++;
   }
 
@@ -525,6 +546,18 @@ function computePredictionAccuracySummary(history) {
   for (const w of lookbacks) {
     const slice = Number.isFinite(w.tradingDays) ? resolved.slice(-w.tradingDays) : resolved;
     if (slice.length < MIN_ACCURACY_SAMPLES) { windows[w.key] = null; continue; }
+
+    // 「ADR歷史相近價位類比估計」是獨立於OLS模型之外的另一種估計法，同一區間內只有
+    // 部分紀錄有這項資料(種子樣本沒有、抓取失敗的日子也可能沒有)，樣本數不足時analog
+    // 欄位整個回傳null，不勉強算一個代表性不足的統計數字，也不影響模型本身的統計。
+    const analogResolved = slice.filter((h) => h.analogEstimate && h.analogEstimate.actual);
+    const analog = analogResolved.length < MIN_ACCURACY_SAMPLES ? null : {
+      sampleSize: analogResolved.length,
+      directionHitRatePct: round(mean(analogResolved.map((h) => (h.analogEstimate.actual.directionHit ? 100 : 0))), 1),
+      meanErrorPct: round(mean(analogResolved.map((h) => h.analogEstimate.actual.errorPct)), 2),
+      meanAbsErrorPct: round(mean(analogResolved.map((h) => h.analogEstimate.actual.absErrorPct)), 2),
+    };
+
     windows[w.key] = {
       label: w.label,
       sampleSize: slice.length,
@@ -533,6 +566,7 @@ function computePredictionAccuracySummary(history) {
       meanAbsErrorPct: round(mean(slice.map((h) => h.actual.absErrorPct)), 2),
       ci68CoveragePct: round(mean(slice.map((h) => (h.actual.withinCi68 ? 100 : 0))), 1),
       ci95CoveragePct: round(mean(slice.map((h) => (h.actual.withinCi95 ? 100 : 0))), 1),
+      analog,
     };
   }
 
@@ -543,6 +577,7 @@ function computePredictionAccuracySummary(history) {
     predictedGapPct: h.predictedGapPct,
     actualGapPct: h.actual.actualGapPct,
     directionHit: h.actual.directionHit,
+    analogGapPct: h.analogEstimate && h.analogEstimate.actual ? h.analogEstimate.actual.analogGapPct : null,
     seeded: h.seeded === true,
   }));
 
@@ -1139,12 +1174,31 @@ async function main() {
     }
   }
 
+  // ---- ADR歷史相近價位類比估計 ----
+  // 這個區塊要放在「開盤價預測準確度追蹤」之前執行：準確度追蹤要把今天的d.adrAnalogMatches
+  // 一併存進歷史紀錄(供之後也追蹤類比估計本身的準不準)，必須先算出來才能用。
+  if (adrDaily6mo && fxDaily6mo) {
+    try {
+      const analog = findAnalogMatches(adrPrice, adrDaily6mo.series, fxDaily6mo.series, d.daily);
+      if (analog) {
+        d.adrAnalogMatches = analog;
+        console.log(`歷史相近ADR價位比對: ${analog.count}筆 (±${analog.tolerancePct}%)  平均對應台股開盤價: ${analog.avgTwOpen}`);
+      } else {
+        console.warn("近6個月無相近ADR價位可比對，略過類比估計");
+      }
+    } catch (e) {
+      console.warn("歷史相近ADR價位比對計算失敗，略過: " + e.message);
+    }
+  }
+
   // ---- 開盤價預測準確度追蹤 ----
   // 不論這次是否成功算出新預測，只要有抓到近1年台股日K，就先回填先前未解析的舊紀錄
   // （所以特意放在if (adrDaily && fxDaily)區塊外面，即使ADR/匯率當次抓取失敗，仍然可以
   // 用這次的台股日K把之前累積的未解析紀錄回填掉，不用等到下次ADR恢復正常才回填）；
   // 今天的新預測（若有算出來）另外併入同一次寫檔。資料庫還是空檔案時，先用最近幾筆訓練
-  // 配對種一批初始樣本，讓卡片一上線就有資料可看。
+  // 配對種一批初始樣本，讓卡片一上線就有資料可看。同時把d.adrAnalogMatches(若有)一併存
+  // 進紀錄，讓「ADR歷史相近價位類比估計」這個既有功能本身的準確度也能被長期追蹤，不是
+  // 只追蹤OLS迴歸模型。
   if (twDaily1y.length > 0) {
     try {
       let history = [];
@@ -1159,12 +1213,15 @@ async function main() {
 
       const predictedDateStr = new Date(new Date(d.generatedAt).getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
       const newEntry = predicted
-        ? buildPredictionHistoryEntry(d.openPrediction, predictionTier, predictedDateStr, d.generatedAt)
+        ? buildPredictionHistoryEntry(d.openPrediction, predictionTier, predictedDateStr, d.generatedAt, false, d.adrAnalogMatches)
         : null;
 
       // 種子樣本直接寫進同一份歷史（在updatePredictionAccuracyHistory做回填/upsert之前），
       // 這樣今天這次執行內，種子樣本也會一併被回填邏輯掃過（雖然種子樣本本來就已經有
-      // actual了，掃過也不會被覆蓋，因為回填邏輯只處理actual===null的項目）。
+      // actual了，掃過也不會被覆蓋，因為回填邏輯只處理actual===null的項目）。種子樣本本身
+      // 沒有對應的「當時6個月類比估計」可回溯(訓練配對用的是完整1年資料算類比，跟這張卡片
+      // 展示用的6個月版本不是同一份計算)，所以種子樣本的analogEstimate固定是null，之後
+      // 每天新增的才會有。
       if (seeds.length > 0) {
         for (const s of seeds) history.push(s);
         await writeFile(PREDICTION_HISTORY_PATH, JSON.stringify(history), "utf8");
@@ -1176,21 +1233,6 @@ async function main() {
       if (summary) d.predictionAccuracySummary = summary;
     } catch (e) {
       console.warn("開盤價預測準確度歷史紀錄更新失敗，略過: " + e.message);
-    }
-  }
-
-  // ---- ADR歷史相近價位類比估計 ----
-  if (adrDaily6mo && fxDaily6mo) {
-    try {
-      const analog = findAnalogMatches(adrPrice, adrDaily6mo.series, fxDaily6mo.series, d.daily);
-      if (analog) {
-        d.adrAnalogMatches = analog;
-        console.log(`歷史相近ADR價位比對: ${analog.count}筆 (±${analog.tolerancePct}%)  平均對應台股開盤價: ${analog.avgTwOpen}`);
-      } else {
-        console.warn("近6個月無相近ADR價位可比對，略過類比估計");
-      }
-    } catch (e) {
-      console.warn("歷史相近ADR價位比對計算失敗，略過: " + e.message);
     }
   }
 

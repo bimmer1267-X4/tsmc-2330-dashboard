@@ -183,7 +183,7 @@
 
 <div class="card" id="prediction-accuracy-card">
   <div style="font-weight:600; margin-bottom:2px;">開盤價預測準確度追蹤 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
-  <div class="sub">追蹤「今日台股開盤價機率預估」過去交易日的預測結果 vs 實際開盤表現，評估模型方向命中率、平均誤差(偏誤)與信賴區間覆蓋率是否符合預期；樣本數不足時對應區間會先隱藏，避免早期少量樣本產生誤導性統計</div>
+  <div class="sub">追蹤「今日台股開盤價機率預估」(OLS模型)與「ADR歷史相近價位類比估計」這兩種方法過去交易日的預測結果 vs 實際開盤表現，評估各自的方向命中率、平均誤差(偏誤)與信賴區間覆蓋率是否符合預期；樣本數不足時對應區間會先隱藏，避免早期少量樣本產生誤導性統計</div>
   <div class="legend" id="accuracy-chart-legend"></div>
   <div class="chart-wrap"><svg id="chart-prediction-accuracy" width="100%" viewBox="0 0 900 160" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-prediction-accuracy"></div></div>
   <div id="accuracy-window-last30">
@@ -972,14 +972,25 @@
       if (!w) { section.style.display = 'none'; return; }
       anyVisible = true;
       section.style.display = '';
-      renderMetricsGrid(gridId, [
+      const metrics = [
         ['方向命中率', fmt(w.directionHitRatePct,1)+'%'],
         ['平均誤差(偏誤)', (w.meanErrorPct>=0?'+':'')+fmt(w.meanErrorPct,2)+'%'],
         ['平均絕對誤差', fmt(w.meanAbsErrorPct,2)+'%'],
         ['68%信賴區間覆蓋率', fmt(w.ci68CoveragePct,1)+'%'],
         ['95%信賴區間覆蓋率', fmt(w.ci95CoveragePct,1)+'%'],
         ['樣本數', w.sampleSize+' 筆'],
-      ]);
+      ];
+      // 「ADR歷史相近價位類比估計」是另一種獨立估計法(不是OLS模型)，跟模型放在同一張
+      // 卡片但分開統計；同一區間內類比估計的可用樣本數可能不夠(w.analog為null)，此時
+      // 就不顯示這幾列，不勉強塞代表性不足的數字。
+      if (w.analog) {
+        metrics.push(
+          ['ADR類比估計-方向命中率', fmt(w.analog.directionHitRatePct,1)+'%'],
+          ['ADR類比估計-平均誤差', (w.analog.meanErrorPct>=0?'+':'')+fmt(w.analog.meanErrorPct,2)+'%'],
+          ['ADR類比估計-平均絕對誤差', fmt(w.analog.meanAbsErrorPct,2)+'%'],
+        );
+      }
+      renderMetricsGrid(gridId, metrics);
     });
     if (!anyVisible) { if (card) card.style.display = 'none'; return; }
 
@@ -1001,8 +1012,12 @@
       const W = 900, H = 160, padT = 10, padB = 20;
       const m = series.length;
       function xs(i) { return padL + (W-padL-padR) * (i / Math.max(m-1,1)); }
+      const hasAnalog = series.some((s) => s.analogGapPct != null);
       let lo = Infinity, hi = -Infinity;
-      series.forEach((s) => { lo = Math.min(lo, s.predictedGapPct, s.actualGapPct); hi = Math.max(hi, s.predictedGapPct, s.actualGapPct); });
+      series.forEach((s) => {
+        lo = Math.min(lo, s.predictedGapPct, s.actualGapPct); hi = Math.max(hi, s.predictedGapPct, s.actualGapPct);
+        if (s.analogGapPct != null) { lo = Math.min(lo, s.analogGapPct); hi = Math.max(hi, s.analogGapPct); }
+      });
       if (lo === hi) { lo -= 1; hi += 1; }
       const pad = (hi-lo)*0.12; lo -= pad; hi += pad;
       function y(v) { return padT + (H-padT-padB) * (1 - (v-lo)/(hi-lo)); }
@@ -1012,14 +1027,24 @@
       axisLabel(svg, padL-6, y(0)+3, '0%');
       [lo+pad, hi-pad].forEach((v) => { axisLabel(svg, padL-6, y(v)+3, fmt(v,1)+'%'); });
 
+      // key對應的值可能是null(例如種子樣本或抓取失敗的日子沒有ADR類比估計資料)，
+      // 沿用主K線圖MA線的畫法：遇到null就斷開，下一個有值的點重新用M開始新的線段，
+      // 不會硬把兩個不相鄰的點連在一起。
       function drawLine(key, colorVar, dashed) {
         let d = '';
-        series.forEach((s,i) => { const cmd = d ? 'L' : 'M'; d += cmd+' '+xs(i)+','+y(s[key])+' '; });
+        series.forEach((s,i) => {
+          const v = s[key];
+          if (v == null) return;
+          const cmd = (i > 0 && series[i-1][key] != null) ? 'L' : 'M';
+          d += cmd+' '+xs(i)+','+y(v)+' ';
+        });
+        if (!d) return;
         const attrs = {d, fill:'none', stroke:colorVar, 'stroke-width':2, 'stroke-linejoin':'round', 'stroke-linecap':'round'};
         if (dashed) attrs['stroke-dasharray'] = '4,3';
         svg.appendChild(el('path', attrs));
       }
       drawLine('predictedGapPct', 'var(--muted)', true);
+      if (hasAnalog) drawLine('analogGapPct', 'var(--ma5)', false);
       drawLine('actualGapPct', 'var(--up)', false);
 
       // 實際缺口%的每個點依方向命中與否上色；種子樣本(回溯試算)用空心點跟即時預測區分。
@@ -1035,7 +1060,10 @@
         axisLabel(svg, xs(i), H-4, series[i].date.slice(5), 'middle');
       }
 
-      [['預測缺口%','var(--muted)'],['實際缺口%','var(--up)'],['方向命中','var(--good)'],['方向未命中','var(--critical)']].forEach(([label,color]) => {
+      const legendDefs = [['預測缺口%','var(--muted)']];
+      if (hasAnalog) legendDefs.push(['ADR類比估計缺口%','var(--ma5)']);
+      legendDefs.push(['實際缺口%','var(--up)'],['方向命中','var(--good)'],['方向未命中','var(--critical)']);
+      legendDefs.forEach(([label,color]) => {
         const item = document.createElement('div'); item.className='legend-item';
         const sw = document.createElement('span'); sw.className='legend-swatch'; sw.style.background=color;
         const t = document.createElement('span'); t.textContent = label;
@@ -1064,9 +1092,14 @@
         tooltip.appendChild(dateEl);
         const rows = [
           ['預測缺口%', (s.predictedGapPct>=0?'+':'')+fmt(s.predictedGapPct,2)+'%', 'var(--muted)'],
+        ];
+        if (s.analogGapPct != null) {
+          rows.push(['ADR類比估計缺口%', (s.analogGapPct>=0?'+':'')+fmt(s.analogGapPct,2)+'%', 'var(--ma5)']);
+        }
+        rows.push(
           ['實際缺口%', (s.actualGapPct>=0?'+':'')+fmt(s.actualGapPct,2)+'%', s.directionHit ? 'var(--good)' : 'var(--critical)'],
           ['方向', s.directionHit ? '命中' : '未命中', null],
-        ];
+        );
         rows.forEach(([k,v,color])=>{
           const row = document.createElement('div'); row.className='t-row';
           const kEl = document.createElement('span'); kEl.className='k';
