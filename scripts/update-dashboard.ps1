@@ -12,6 +12,16 @@ $StockNo = "2330"
 $UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 $OutDir = Join-Path $PSScriptRoot "..\data"
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
+$DataPath = Join-Path $OutDir "data.json"
+
+# 讀取上一次的data.json當基底，主要是為了讓epsInfo在抓不到最新資料時，
+# 能拿$Previous.epsInfo當備援值。檔案不存在(第一次執行)或格式壞掉都當作
+# 沒有舊資料處理，不影響本次照常執行。
+$Previous = $null
+if (Test-Path $DataPath) {
+    try { $Previous = Get-Content $DataPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { $Previous = $null }
+}
 
 function Invoke-TwseJson($url) {
     $resp = Invoke-WebRequest -Uri $url -UserAgent $UA -TimeoutSec 30 -UseBasicParsing
@@ -95,9 +105,12 @@ $valuation = [PSCustomObject]@{
 
 Write-Host "[3/4] 抓取最新季度EPS (t187ap14_L)..."
 # 季度EPS只用來算「全年預估EPS估值」卡片，不是股價/K線/技術指標這些核心資料。
-# t187ap14_L是「當季」彙總表，換季空窗期可能暫時查不到2330，這種情況不該讓
-# 整條pipeline失敗、連帶擋下當天原本抓得到的股價資料——抓不到就讓$epsInfo
-# 維持$null，讓後續官方預估區塊照既有邏輯優雅地略過即可。
+# t187ap14_L是「當季」彙總表，每季換新資料時會有幾天到兩週的空窗期(舊一季的
+# 資料已經清掉、新一季2330還沒申報完，這一列會整個從表裡消失)，這種情況不該
+# 讓整條pipeline失敗、連帶擋下當天原本抓得到的股價資料——所以抓不到就沿用
+# 上一次成功抓到的舊資料當備援(讓卡片繼續有東西可看，而不是空白)，而不是直接
+# 變成$null。這支script每天都會執行這段抓取，一旦t187ap14_L真的更新了，下一
+# 次執行自然就會抓到新值、蓋掉備援的舊資料，不需要另外寫輪詢機制。
 $epsInfo = $null
 try {
     $epsResp = Invoke-TwseJson "https://openapi.twse.com.tw/v1/opendata/t187ap14_L"
@@ -111,7 +124,12 @@ try {
         netIncome = ConvertTo-Num $epsRow.稅後淨利
     }
 } catch {
-    Write-Host "  季度EPS抓取失敗，epsInfo維持null: $($_.Exception.Message)"
+    if ($Previous -and $Previous.epsInfo) {
+        $epsInfo = $Previous.epsInfo
+        Write-Host "  季度EPS抓取失敗，沿用上次資料($($epsInfo.year)年第$($epsInfo.season)季)當備援: $($_.Exception.Message)"
+    } else {
+        Write-Host "  季度EPS抓取失敗，且沒有上一次的資料可沿用，epsInfo維持null: $($_.Exception.Message)"
+    }
 }
 
 Write-Host "[4/4] 計算技術指標..."
@@ -233,18 +251,23 @@ for ($i = 0; $i -lt $n; $i++) {
 
 $latestRsi = ($indicators | Where-Object { $_.rsi14 -ne $null } | Select-Object -Last 1).rsi14
 
-$result = [PSCustomObject]@{
-    generatedAt = (Get-Date).ToString("yyyy-MM-ddTHH:mm:sszzz")
-    stockNo     = $StockNo
-    daily       = $daily
-    indicators  = $indicators
-    valuation   = $valuation
-    epsInfo     = $epsInfo
-    latestRsi   = $latestRsi
-    adr         = $null   # 由 Claude 於合併步驟填入 (stockanalysis.com + Yahoo Finance 交叉比對)
-    fxRate      = $null   # 由 Claude 於合併步驟填入 (央行/Yahoo 交叉比對)
+# 以$Previous的欄位當基底疊上去，讓taifexNightClose等其他script後續寫入的
+# 欄位在本次執行中途也還看得到「上一次」的值(例如taifexNightClose計算漲跌%
+# 要拿舊值當基準)，而不是每天一開始就被整份覆蓋成空的。
+$resultHash = @{}
+if ($Previous) {
+    foreach ($p in $Previous.PSObject.Properties) { $resultHash[$p.Name] = $p.Value }
 }
+$resultHash.generatedAt = (Get-Date).ToString("yyyy-MM-ddTHH:mm:sszzz")
+$resultHash.stockNo     = $StockNo
+$resultHash.daily       = $daily
+$resultHash.indicators  = $indicators
+$resultHash.valuation   = $valuation
+$resultHash.epsInfo     = $epsInfo
+$resultHash.latestRsi   = $latestRsi
+$resultHash.adr         = $null   # 由 Claude 於合併步驟填入 (stockanalysis.com + Yahoo Finance 交叉比對)
+$resultHash.fxRate      = $null   # 由 Claude 於合併步驟填入 (央行/Yahoo 交叉比對)
+$result = [PSCustomObject]$resultHash
 
-$outFile = Join-Path $OutDir "data.json"
-$result | ConvertTo-Json -Depth 6 -Compress | Out-File -FilePath $outFile -Encoding utf8
-Write-Host "已輸出: $outFile"
+$result | ConvertTo-Json -Depth 6 -Compress | Out-File -FilePath $DataPath -Encoding utf8
+Write-Host "已輸出: $DataPath"

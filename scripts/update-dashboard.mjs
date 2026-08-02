@@ -5,12 +5,13 @@
 //
 // ADR / 匯率資料不在本腳本抓取範圍內，由呼叫端（Claude / merge-and-classify.mjs）另行提供。
 
-import { writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = join(__dirname, "..", "data");
+const DATA_PATH = join(OUT_DIR, "data.json");
 const STOCK_NO = "2330";
 const UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
 
@@ -101,11 +102,14 @@ async function fetchValuation(daily) {
 }
 
 // 季度EPS只用來算「全年預估EPS估值」卡片，不是股價/K線/技術指標這些核心資料。
-// t187ap14_L是「當季」彙總表，每季換新資料時會有幾天空窗期(例如新一季企業
-// 還沒申報完，2330這一列可能暫時不在表裡)，這種情況不該讓整條pipeline失敗、
-// 連帶把當天原本抓得到的股價資料也一起擋下來——所以抓不到就回傳null，讓
-// merge-and-classify.mjs的官方預估區塊照既有邏輯(try/catch)優雅地略過即可。
-async function fetchEpsInfo() {
+// t187ap14_L是「當季」彙總表，每季換新資料時會有幾天到兩週的空窗期(舊一季的
+// 資料已經清掉、新一季2330還沒申報完，這一列會整個從表裡消失)，這種情況不該
+// 讓整條pipeline失敗、連帶把當天原本抓得到的股價資料也一起擋下來——所以抓不
+// 到就沿用上一次成功抓到的舊資料當備援(讓卡片繼續有東西可看，而不是空白)，
+// 而不是直接回傳null。main()每天都會執行這個函式，一旦t187ap14_L真的更新了
+// (不管是原本那一季重新出現、還是換成新一季)，下一次執行自然就會抓到新值、
+// 蓋掉備援的舊資料，不需要另外寫輪詢機制。
+async function fetchEpsInfo(previous) {
   console.log("[3/4] 抓取最新季度EPS (t187ap14_L)...");
   try {
     const rows = await fetchJson("https://openapi.twse.com.tw/v1/opendata/t187ap14_L");
@@ -119,7 +123,11 @@ async function fetchEpsInfo() {
       netIncome: toNum(row["稅後淨利"]),
     };
   } catch (e) {
-    console.warn(`  季度EPS抓取失敗，epsInfo維持null: ${e.message}`);
+    if (previous) {
+      console.warn(`  季度EPS抓取失敗，沿用上次資料(${previous.year}年第${previous.season}季)當備援: ${e.message}`);
+      return previous;
+    }
+    console.warn(`  季度EPS抓取失敗，且沒有上一次的資料可沿用，epsInfo維持null: ${e.message}`);
     return null;
   }
 }
@@ -257,12 +265,24 @@ function computeIndicators(daily) {
 
 async function main() {
   await mkdir(OUT_DIR, { recursive: true });
+
+  // 讀取上一次的data.json當基底(以物件展開的方式疊上去)，主要是為了讓
+  // fetchEpsInfo()在抓不到最新資料時，能拿previous.epsInfo當備援值。檔案
+  // 不存在(第一次執行)或格式壞掉都當作沒有舊資料處理，不影響本次照常執行。
+  let previous = {};
+  try {
+    previous = JSON.parse(await readFile(DATA_PATH, "utf8"));
+  } catch {
+    // 沒有舊檔案或讀取失敗，視為第一次執行
+  }
+
   const daily = await fetchDaily();
   const valuation = await fetchValuation(daily);
-  const epsInfo = await fetchEpsInfo();
+  const epsInfo = await fetchEpsInfo(previous.epsInfo ?? null);
   const { indicators, latestRsi } = computeIndicators(daily);
 
   const result = {
+    ...previous,
     generatedAt: new Date().toISOString(),
     stockNo: STOCK_NO,
     daily,
@@ -274,9 +294,8 @@ async function main() {
     fxRate: null,
   };
 
-  const outFile = join(OUT_DIR, "data.json");
-  await writeFile(outFile, JSON.stringify(result), "utf8");
-  console.log(`已輸出: ${outFile}`);
+  await writeFile(DATA_PATH, JSON.stringify(result), "utf8");
+  console.log(`已輸出: ${DATA_PATH}`);
 }
 
 main().catch((e) => {
