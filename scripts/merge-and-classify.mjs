@@ -7,6 +7,9 @@
 // 台股開盤價（含68%/95%信賴區間、上漲機率、模型信心指數＝調整後R²）。
 // 另外會把ADR溢價率逐日累積寫進 data/adr-premium-history.json（永久保留，不像
 // data.json只留近6個月滾動視窗），供未來回測溢價率對開盤缺口是否有額外預測力。
+// 同時把每天的開盤價預測、以及後續回填的實際開盤/收盤結果，永久累積寫進
+// data/prediction-accuracy-history.json，供長期追蹤模型的方向命中率/誤差(偏誤)/
+// 信賴區間覆蓋率是否符合預期，聚合摘要寫進 data.json 的 predictionAccuracySummary。
 // 跨平台版本 (Node.js)，邏輯與 merge-and-classify.ps1 對等。
 //
 // 用法（手動交叉比對）：
@@ -25,6 +28,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = join(__dirname, "..", "data", "data.json");
 const CONFIG_PATH = join(__dirname, "..", "data", "config.json");
 const PREMIUM_HISTORY_PATH = join(__dirname, "..", "data", "adr-premium-history.json");
+const PREDICTION_HISTORY_PATH = join(__dirname, "..", "data", "prediction-accuracy-history.json");
 const YF_UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
 // ADR/匯率序列固定抓1年：「套牢價(ADR近6個月最高)」「ADR歷史相近價位類比估計」這兩個
 // 既有功能仍然只看近6個月(用filterSeriesToRecentMonths從這份1年資料裡篩出6個月子集，
@@ -37,6 +41,13 @@ const MIN_REGRESSION_SAMPLES_V2 = 60;
 const MIN_REGRESSION_SAMPLES_V3 = 80;
 // 溢價率「相對自身近期水準」的移動平均天數，用來算「溢價偏離」這個預測變數。
 const PREMIUM_ROLL_WINDOW_DAYS = 60;
+// 開盤價預測準確度追蹤：統計區間樣本數低於這個門檻就不顯示(避免早期少量樣本產生誤導性
+// 統計)；前端折線圖只取最近這麼多筆已解析的紀錄(有界，不讓data.json隨資料庫無限增肥)；
+// 資料庫是空檔案時，用「最近這麼多個」歷史訓練配對回溯種一批初始樣本，讓卡片一上線就有
+// 資料可看，不用真的等一整週。
+const MIN_ACCURACY_SAMPLES = 10;
+const ACCURACY_RECENT_SERIES_LIMIT = 120;
+const ACCURACY_SEED_COUNT = 5;
 
 function parseArgs(argv) {
   const out = {};
@@ -359,6 +370,220 @@ async function updateAdrPremiumHistory(twDaily, adrDaily, fxDaily, adrRatio) {
   return merged;
 }
 
+// 把 d.openPrediction（三/雙/單變數三種形狀之一）攤平成「開盤價預測準確度追蹤」歷史紀錄
+// 的固定schema。basisPremiumDevPct/basisAnalogGapPct/confidenceIndexPct在單變數(甚至雙
+// 變數)版本可能不存在，用 ?? null 讓欄位形狀固定，方便之後統一讀取，不用每次判斷是哪一層。
+// analogMatches(即d.adrAnalogMatches，「ADR歷史相近價位類比估計」卡片本身的資料)是另一
+// 個獨立追蹤對象——不是OLS模型的一部分，是同一張卡片上另一種估計方式，所以額外存一份
+// analogEstimate，回填時會一併算出這個估計法自己的誤差/命中率，讓使用者能比較兩種方法
+// 誰比較準，不是只看模型。
+function buildPredictionHistoryEntry(openPrediction, modelTier, predictedDateStr, predictedAt, seeded = false, analogMatches = null) {
+  const m = openPrediction.model;
+  return {
+    date: predictedDateStr,
+    predictedAt,
+    modelTier,
+    predictedGapPct: openPrediction.predictedGapPct,
+    predictedOpen: openPrediction.predictedOpen,
+    ci68: { low: openPrediction.ci68.low, high: openPrediction.ci68.high },
+    ci95: { low: openPrediction.ci95.low, high: openPrediction.ci95.high },
+    probUpPct: openPrediction.probUpPct,
+    basisAdrChangePct: openPrediction.basisAdrChangePct,
+    basisPremiumDevPct: openPrediction.basisPremiumDevPct ?? null,
+    basisAnalogGapPct: openPrediction.basisAnalogGapPct ?? null,
+    basisPrevClose: openPrediction.basisPrevClose,
+    residualStd: m.residualStd,
+    confidenceIndexPct: m.confidenceIndexPct ?? null,
+    seeded,
+    analogEstimate: analogMatches
+      ? { avgTwOpen: analogMatches.avgTwOpen, tolerancePct: analogMatches.tolerancePct, count: analogMatches.count, actual: null }
+      : null,
+    actual: null,
+  };
+}
+
+// 依模型層級把訓練配對(pair: {adrChangePct, premiumDev?, analogGapPct?})套進對應的迴歸公式，
+// 算出「如果那天用這個(已經擬合好的)模型會預測出的開盤缺口%」——只給「種子回溯」使用，
+// 邏輯跟main()裡即時預測套用係數的算法完全一致，只是輸入換成歷史配對而不是「今天」的值。
+function predictGapPctForTier(pair, modelTier, model) {
+  if (modelTier === 3) {
+    const [b0, b1, b2, b3] = model.beta;
+    return b0 + b1 * pair.adrChangePct + b2 * pair.premiumDev + b3 * pair.analogGapPct;
+  }
+  if (modelTier === 2) {
+    return model.b0 + model.b1 * pair.adrChangePct + model.b2 * pair.premiumDev;
+  }
+  return model.beta * pair.adrChangePct + model.alpha;
+}
+
+// 開盤價預測準確度追蹤：資料庫是空檔案時，借用訓練配對(modelPairs，已經是「用當時已知
+// 資訊算出的特徵 vs 實際缺口%」)裡最近ACCURACY_SEED_COUNT筆，套用這次擬合好的模型係數
+// 反推出「如果那天這樣預測，結果會是多少」，直接連同已知的實際結果一起寫入，標記
+// seeded:true。這樣卡片一上線就有資料可看，不用真的等一整週才有第一筆。
+// ⚠️ 限制：這幾筆用的是「看過完整1年資料後」擬合出的係數回推，係數本身有看過這幾天
+// (輕微樣本內偏差)，不是真正blind的即時預測——之後每天新增的才是真正的即時預測，
+// 前端會分開標示，不能把種子樣本的準確度直接當作模型的真實線上表現。
+function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model) {
+  if (history.length > 0 || !modelPairs || modelPairs.length === 0) return [];
+  const seeds = modelPairs.slice(-ACCURACY_SEED_COUNT);
+  const now = new Date().toISOString();
+  return seeds.map((pair) => {
+    const predictedGapPct = round(predictGapPctForTier(pair, modelTier, model), 2);
+    const priceAt = (gapPct) => round(pair.prevClose * (1 + gapPct / 100), 2);
+    const probUpPct = round(normalCdf(predictedGapPct / model.residualStd) * 100, 1);
+    const actualGapPct = round((pair.actualOpen / pair.prevClose - 1) * 100, 2);
+    const errorPct = round(predictedGapPct - actualGapPct, 2);
+    const ci68 = { low: priceAt(predictedGapPct - model.residualStd), high: priceAt(predictedGapPct + model.residualStd) };
+    const ci95 = { low: priceAt(predictedGapPct - 1.96 * model.residualStd), high: priceAt(predictedGapPct + 1.96 * model.residualStd) };
+    return {
+      date: pair.twDate,
+      predictedAt: now,
+      modelTier,
+      predictedGapPct,
+      predictedOpen: priceAt(predictedGapPct),
+      ci68,
+      ci95,
+      probUpPct,
+      basisAdrChangePct: round(pair.adrChangePct, 2),
+      basisPremiumDevPct: modelTier >= 2 ? round(pair.premiumDev, 2) : null,
+      basisAnalogGapPct: modelTier >= 3 ? round(pair.analogGapPct, 2) : null,
+      basisPrevClose: pair.prevClose,
+      residualStd: round(model.residualStd, 4),
+      confidenceIndexPct: modelTier >= 2 ? round(Math.max(0, model.adjR2) * 100, 1) : null,
+      seeded: true,
+      actual: {
+        open: pair.actualOpen,
+        close: pair.actualClose,
+        actualGapPct,
+        errorPct,
+        absErrorPct: round(Math.abs(errorPct), 2),
+        directionHit: Math.sign(predictedGapPct) === Math.sign(actualGapPct),
+        withinCi68: pair.actualOpen >= ci68.low && pair.actualOpen <= ci68.high,
+        withinCi95: pair.actualOpen >= ci95.low && pair.actualOpen <= ci95.high,
+        resolvedAt: now,
+      },
+    };
+  });
+}
+
+// 開盤價預測準確度歷史：永久保留、逐日累積(跟updateAdrPremiumHistory同一套read-try/catch
+// →Map upsert-by-date→sort→write模式)。每次執行做兩件事：(1)回填先前已經記錄、但當時
+// 台股還沒收盤所以actual還是null的舊項目——用這次新抓到的twDaily檢查那些日期現在是否
+// 已經收盤，收了就補上實際開盤/收盤/誤差/是否落在信賴區間；(2)如果這次有算出新預測
+// (newEntry非null)，以actual:null的狀態upsert進去，等未來的執行回填。
+async function updatePredictionAccuracyHistory(twDaily, newEntry) {
+  let history = [];
+  try {
+    history = JSON.parse(await readFile(PREDICTION_HISTORY_PATH, "utf8"));
+  } catch {
+    // 檔案不存在(第一次執行)或格式壞掉，視為空歷史，從頭建立
+  }
+  const byDate = new Map(history.map((h) => [h.date, h]));
+  const twByDate = new Map(twDaily.map((t) => [t.date, t]));
+
+  let backfilled = 0;
+  for (const entry of byDate.values()) {
+    if (entry.actual != null) continue;
+    const day = twByDate.get(entry.date);
+    if (!day) continue; // 該日還沒收盤(或不在目前抓到的範圍內)，之後執行再回填
+    const actualGapPct = round((day.open / entry.basisPrevClose - 1) * 100, 2);
+    const errorPct = round(entry.predictedGapPct - actualGapPct, 2);
+    const resolvedAt = new Date().toISOString();
+    entry.actual = {
+      open: day.open,
+      close: day.close,
+      actualGapPct,
+      errorPct,
+      absErrorPct: round(Math.abs(errorPct), 2),
+      directionHit: Math.sign(entry.predictedGapPct) === Math.sign(actualGapPct),
+      withinCi68: day.open >= entry.ci68.low && day.open <= entry.ci68.high,
+      withinCi95: day.open >= entry.ci95.low && day.open <= entry.ci95.high,
+      resolvedAt,
+    };
+    // 「ADR歷史相近價位類比估計」是另一種獨立估計法(不是OLS模型)，同一天有記錄到的話
+    // 也一併算出它自己的缺口%/誤差/方向命中，跟模型的準確度分開比較。
+    if (entry.analogEstimate) {
+      const analogGapPct = round((entry.analogEstimate.avgTwOpen / entry.basisPrevClose - 1) * 100, 2);
+      const analogErrorPct = round(analogGapPct - actualGapPct, 2);
+      entry.analogEstimate.actual = {
+        analogGapPct,
+        errorPct: analogErrorPct,
+        absErrorPct: round(Math.abs(analogErrorPct), 2),
+        directionHit: Math.sign(analogGapPct) === Math.sign(actualGapPct),
+        resolvedAt,
+      };
+    }
+    backfilled++;
+  }
+
+  if (newEntry) {
+    const existing = byDate.get(newEntry.date);
+    byDate.set(newEntry.date, { ...newEntry, actual: existing?.actual ?? null });
+  }
+
+  const merged = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  await writeFile(PREDICTION_HISTORY_PATH, JSON.stringify(merged), "utf8");
+  console.log(`已更新開盤價預測準確度歷史紀錄: ${PREDICTION_HISTORY_PATH}（累計 ${merged.length} 筆，本次回填 ${backfilled} 筆${newEntry ? "，新增今日1筆" : ""}）`);
+  return merged;
+}
+
+// 把歷史紀錄彙總成前端要顯示的統計摘要：近30/近90個交易日、累計至今三個區間，各自算
+// 方向命中率/平均誤差(偏誤方向)/平均絕對誤差/68%與95%信賴區間覆蓋率。樣本數低於
+// MIN_ACCURACY_SAMPLES的區間回傳null，前端對應區塊要隱藏，避免樣本太少時的統計沒有代表性。
+function computePredictionAccuracySummary(history) {
+  const resolved = [...history]
+    .filter((h) => h.actual != null)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  if (resolved.length === 0) return null;
+
+  const lookbacks = [
+    { key: "last30", label: "近30個交易日", tradingDays: 30 },
+    { key: "last90", label: "近90個交易日", tradingDays: 90 },
+    { key: "sinceInception", label: "累計至今", tradingDays: Infinity },
+  ];
+
+  const windows = {};
+  for (const w of lookbacks) {
+    const slice = Number.isFinite(w.tradingDays) ? resolved.slice(-w.tradingDays) : resolved;
+    if (slice.length < MIN_ACCURACY_SAMPLES) { windows[w.key] = null; continue; }
+
+    // 「ADR歷史相近價位類比估計」是獨立於OLS模型之外的另一種估計法，同一區間內只有
+    // 部分紀錄有這項資料(種子樣本沒有、抓取失敗的日子也可能沒有)，樣本數不足時analog
+    // 欄位整個回傳null，不勉強算一個代表性不足的統計數字，也不影響模型本身的統計。
+    const analogResolved = slice.filter((h) => h.analogEstimate && h.analogEstimate.actual);
+    const analog = analogResolved.length < MIN_ACCURACY_SAMPLES ? null : {
+      sampleSize: analogResolved.length,
+      directionHitRatePct: round(mean(analogResolved.map((h) => (h.analogEstimate.actual.directionHit ? 100 : 0))), 1),
+      meanErrorPct: round(mean(analogResolved.map((h) => h.analogEstimate.actual.errorPct)), 2),
+      meanAbsErrorPct: round(mean(analogResolved.map((h) => h.analogEstimate.actual.absErrorPct)), 2),
+    };
+
+    windows[w.key] = {
+      label: w.label,
+      sampleSize: slice.length,
+      directionHitRatePct: round(mean(slice.map((h) => (h.actual.directionHit ? 100 : 0))), 1),
+      meanErrorPct: round(mean(slice.map((h) => h.actual.errorPct)), 2),
+      meanAbsErrorPct: round(mean(slice.map((h) => h.actual.absErrorPct)), 2),
+      ci68CoveragePct: round(mean(slice.map((h) => (h.actual.withinCi68 ? 100 : 0))), 1),
+      ci95CoveragePct: round(mean(slice.map((h) => (h.actual.withinCi95 ? 100 : 0))), 1),
+      analog,
+    };
+  }
+
+  if (Object.values(windows).every((w) => w == null)) return null;
+
+  const recentSeries = resolved.slice(-ACCURACY_RECENT_SERIES_LIMIT).map((h) => ({
+    date: h.date,
+    predictedGapPct: h.predictedGapPct,
+    actualGapPct: h.actual.actualGapPct,
+    directionHit: h.actual.directionHit,
+    analogGapPct: h.analogEstimate && h.analogEstimate.actual ? h.analogEstimate.actual.analogGapPct : null,
+    seeded: h.seeded === true,
+  }));
+
+  return { resolvedSampleSize: resolved.length, windows, recentSeries };
+}
+
 // 用近1年 ADR(TSM)/USD-TWD/台股日K，訓練「ADR單日漲跌% → 台股隔日開盤缺口%」OLS迴歸。
 // adrSeries/fxSeries: [{date, close}]（date為美東交易日期字串）；twDaily: 近1年台股日K。
 function buildOpenGapModel(adrSeries, fxSeries, twDaily) {
@@ -385,7 +610,7 @@ function buildOpenGapModel(adrSeries, fxSeries, twDaily) {
     const T = twDaily[tIdx], Tprev = twDaily[tIdx - 1];
     const twOpenGapPct = (T.open / Tprev.close - 1) * 100;
 
-    pairs.push({ twDate: T.date, adrChangePct, twOpenGapPct });
+    pairs.push({ twDate: T.date, adrChangePct, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
   }
 
   // 同一台股交易日可能對應多個ADR日期（例如週一對應上週五+週末），只留每個台股交易日最後一筆。
@@ -400,7 +625,10 @@ function buildOpenGapModel(adrSeries, fxSeries, twDaily) {
   const residualStd = stddev(residuals);
   const hitRate = uniq.filter((p) => Math.sign(p.adrChangePct) === Math.sign(p.twOpenGapPct) && p.adrChangePct !== 0).length / uniq.length;
 
-  return { ...reg, residualStd, hitRate };
+  // pairs依twDate排序後回傳，供「開盤價預測準確度追蹤」的種子回溯邏輯取「最近幾筆」用
+  // （種子回溯只是借用訓練配對已經算好的特徵值，不是重新發明一套邏輯）。
+  const pairsSorted = [...uniq].sort((a, b) => (a.twDate < b.twDate ? -1 : a.twDate > b.twDate ? 1 : 0));
+  return { ...reg, residualStd, hitRate, pairs: pairsSorted };
 }
 
 // 雙變數版本：「ADR單日漲跌% + ADR溢價率偏離近期均值」→ 台股隔日開盤缺口%。
@@ -445,7 +673,7 @@ function buildOpenGapModelV2(adrSeries, fxSeries, twDaily, premiumHistory, rollW
     const rollMean = mean(window);
     const premiumDev = premiumSorted[pIdx].premiumPct - rollMean;
 
-    pairs.push({ twDate: T.date, adrChangePct, premiumDev, twOpenGapPct });
+    pairs.push({ twDate: T.date, adrChangePct, premiumDev, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
   }
 
   const byTwDate = new Map();
@@ -461,7 +689,8 @@ function buildOpenGapModelV2(adrSeries, fxSeries, twDaily, premiumHistory, rollW
   const residualStd = stddev(residuals);
   const hitRate = uniq.filter((p) => Math.sign(p.adrChangePct) === Math.sign(p.twOpenGapPct) && p.adrChangePct !== 0).length / uniq.length;
 
-  return { ...reg, residualStd, hitRate };
+  const pairsSorted = [...uniq].sort((a, b) => (a.twDate < b.twDate ? -1 : a.twDate > b.twDate ? 1 : 0));
+  return { ...reg, residualStd, hitRate, pairs: pairsSorted };
 }
 
 function round(v, d) { const f = 10 ** d; return Math.round(v * f) / f; }
@@ -575,7 +804,7 @@ function buildOpenGapModelV3(adrSeries, fxSeries, twDaily, premiumHistory, rollW
     if (!analog) continue;
     const analogGapPct = (analog.avgTwOpen / Tprev.close - 1) * 100;
 
-    pairs.push({ twDate: T.date, adrChangePct, premiumDev, analogGapPct, twOpenGapPct });
+    pairs.push({ twDate: T.date, adrChangePct, premiumDev, analogGapPct, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
   }
 
   const byTwDate = new Map();
@@ -590,7 +819,8 @@ function buildOpenGapModelV3(adrSeries, fxSeries, twDaily, premiumHistory, rollW
   const residualStd = stddev(residuals);
   const hitRate = uniq.filter((p) => Math.sign(p.adrChangePct) === Math.sign(p.twOpenGapPct) && p.adrChangePct !== 0).length / uniq.length;
 
-  return { ...reg, residualStd, hitRate };
+  const pairsSorted = [...uniq].sort((a, b) => (a.twDate < b.twDate ? -1 : a.twDate > b.twDate ? 1 : 0));
+  return { ...reg, residualStd, hitRate, pairs: pairsSorted };
 }
 
 function classifyZone(pe, rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60, peLabel) {
@@ -777,9 +1007,10 @@ async function main() {
   // 溢價偏離的雙變數模型；溢價歷史也不夠長的話再退回僅ADR漲跌%的單變數模型。不管哪一層
   // 都不讓卡片直接消失——這些退回路徑理論上只有在資料還在累積的最初期間才會用到，1年
   // 回填後樣本數已經足夠，正常情況下應該都會走三變數模型。
+  let predicted = false;
+  let predictionTier = null;
+  let predictionModel = null;
   if (adrDaily && fxDaily) {
-    let predicted = false;
-
     try {
       const model3 = twDaily1y.length > 0
         ? buildOpenGapModelV3(adrDaily.series, fxDaily.series, twDaily1y, premiumHistory, PREMIUM_ROLL_WINDOW_DAYS)
@@ -836,6 +1067,8 @@ async function main() {
           },
         };
         predicted = true;
+        predictionTier = 3;
+        predictionModel = model3;
         console.log(`開盤價機率預估(三變數): 缺口${d.openPrediction.predictedGapPct}%  預估開盤價${d.openPrediction.predictedOpen}  上漲機率${probUpPct}%（調整後R²=${model3.adjR2.toFixed(3)}, n=${model3.n}, 類比缺口t值=${model3.t[3].toFixed(2)}）`);
       }
     } catch (e) {
@@ -889,6 +1122,8 @@ async function main() {
             },
           };
           predicted = true;
+          predictionTier = 2;
+          predictionModel = model2;
           console.log(`開盤價機率預估(雙變數退回): 缺口${d.openPrediction.predictedGapPct}%  預估開盤價${d.openPrediction.predictedOpen}  上漲機率${probUpPct}%（調整後R²=${model2.adjR2.toFixed(3)}, n=${model2.n}）`);
         }
       } catch (e) {
@@ -925,6 +1160,8 @@ async function main() {
             },
           };
           predicted = true;
+          predictionTier = 1;
+          predictionModel = model;
           console.log(`開盤價機率預估(單變數退回): 缺口${d.openPrediction.predictedGapPct}%  預估開盤價${d.openPrediction.predictedOpen}  上漲機率${probUpPct}%（R²=${model.r2.toFixed(2)}, n=${model.n}）`);
         }
       } catch (e) {
@@ -938,6 +1175,8 @@ async function main() {
   }
 
   // ---- ADR歷史相近價位類比估計 ----
+  // 這個區塊要放在「開盤價預測準確度追蹤」之前執行：準確度追蹤要把今天的d.adrAnalogMatches
+  // 一併存進歷史紀錄(供之後也追蹤類比估計本身的準不準)，必須先算出來才能用。
   if (adrDaily6mo && fxDaily6mo) {
     try {
       const analog = findAnalogMatches(adrPrice, adrDaily6mo.series, fxDaily6mo.series, d.daily);
@@ -949,6 +1188,51 @@ async function main() {
       }
     } catch (e) {
       console.warn("歷史相近ADR價位比對計算失敗，略過: " + e.message);
+    }
+  }
+
+  // ---- 開盤價預測準確度追蹤 ----
+  // 不論這次是否成功算出新預測，只要有抓到近1年台股日K，就先回填先前未解析的舊紀錄
+  // （所以特意放在if (adrDaily && fxDaily)區塊外面，即使ADR/匯率當次抓取失敗，仍然可以
+  // 用這次的台股日K把之前累積的未解析紀錄回填掉，不用等到下次ADR恢復正常才回填）；
+  // 今天的新預測（若有算出來）另外併入同一次寫檔。資料庫還是空檔案時，先用最近幾筆訓練
+  // 配對種一批初始樣本，讓卡片一上線就有資料可看。同時把d.adrAnalogMatches(若有)一併存
+  // 進紀錄，讓「ADR歷史相近價位類比估計」這個既有功能本身的準確度也能被長期追蹤，不是
+  // 只追蹤OLS迴歸模型。
+  if (twDaily1y.length > 0) {
+    try {
+      let history = [];
+      try {
+        history = JSON.parse(await readFile(PREDICTION_HISTORY_PATH, "utf8"));
+      } catch {
+        // 檔案不存在，視為空歷史
+      }
+      const seeds = predictionModel
+        ? seedPredictionHistoryIfEmpty(history, predictionModel.pairs, predictionTier, predictionModel)
+        : [];
+
+      const predictedDateStr = new Date(new Date(d.generatedAt).getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+      const newEntry = predicted
+        ? buildPredictionHistoryEntry(d.openPrediction, predictionTier, predictedDateStr, d.generatedAt, false, d.adrAnalogMatches)
+        : null;
+
+      // 種子樣本直接寫進同一份歷史（在updatePredictionAccuracyHistory做回填/upsert之前），
+      // 這樣今天這次執行內，種子樣本也會一併被回填邏輯掃過（雖然種子樣本本來就已經有
+      // actual了，掃過也不會被覆蓋，因為回填邏輯只處理actual===null的項目）。種子樣本本身
+      // 沒有對應的「當時6個月類比估計」可回溯(訓練配對用的是完整1年資料算類比，跟這張卡片
+      // 展示用的6個月版本不是同一份計算)，所以種子樣本的analogEstimate固定是null，之後
+      // 每天新增的才會有。
+      if (seeds.length > 0) {
+        for (const s of seeds) history.push(s);
+        await writeFile(PREDICTION_HISTORY_PATH, JSON.stringify(history), "utf8");
+        console.log(`開盤價預測準確度歷史紀錄為空，已用最近${seeds.length}筆訓練配對回溯種子樣本（標記seeded:true）`);
+      }
+
+      const predictionHistory = await updatePredictionAccuracyHistory(twDaily1y, newEntry);
+      const summary = computePredictionAccuracySummary(predictionHistory);
+      if (summary) d.predictionAccuracySummary = summary;
+    } catch (e) {
+      console.warn("開盤價預測準確度歷史紀錄更新失敗，略過: " + e.message);
     }
   }
 
