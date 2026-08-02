@@ -999,10 +999,11 @@
       ? '⚠️ 其中 ' + seededCount + ' 筆(圖表上以空心點標示)為上線當天用歷史資料回溯試算的種子樣本，模型係數已經看過這幾天的結果，不是真正的即時盲測，之後累積的樣本才是模型的真實線上表現。'
       : '';
 
-    // ---- 預測 vs 實際缺口% 走勢圖 ----
+    // ---- 盤前股價預測 vs ADR歷史相近價位 vs 收盤價 走勢圖 ----
     // 樣本數跟主K線圖(daily.length)不同，不能沿用全域的n/xScale/attachHoverTooltip
     // (它們是綁定daily.length的)，這裡自己建一份局部的座標尺度與十字線互動邏輯，
-    // 畫法沿用chart-price那段inline crosshair的寫法。
+    // 畫法沿用chart-price那段inline crosshair的寫法。改用實際價位(元)而不是缺口%，
+    // 直接看三條價格線比較直觀，缺口%/命中與否只留在tooltip裡當補充資訊。
     const series = acc.recentSeries || [];
     const svg = document.getElementById('chart-prediction-accuracy');
     const legend = document.getElementById('accuracy-chart-legend');
@@ -1012,20 +1013,20 @@
       const W = 900, H = 160, padT = 10, padB = 20;
       const m = series.length;
       function xs(i) { return padL + (W-padL-padR) * (i / Math.max(m-1,1)); }
-      const hasAnalog = series.some((s) => s.analogGapPct != null);
+      const hasAnalog = series.some((s) => s.analogPrice != null);
       let lo = Infinity, hi = -Infinity;
       series.forEach((s) => {
-        lo = Math.min(lo, s.predictedGapPct, s.actualGapPct); hi = Math.max(hi, s.predictedGapPct, s.actualGapPct);
-        if (s.analogGapPct != null) { lo = Math.min(lo, s.analogGapPct); hi = Math.max(hi, s.analogGapPct); }
+        lo = Math.min(lo, s.predictedPrice, s.actualPrice); hi = Math.max(hi, s.predictedPrice, s.actualPrice);
+        if (s.analogPrice != null) { lo = Math.min(lo, s.analogPrice); hi = Math.max(hi, s.analogPrice); }
       });
       if (lo === hi) { lo -= 1; hi += 1; }
       const pad = (hi-lo)*0.12; lo -= pad; hi += pad;
       function y(v) { return padT + (H-padT-padB) * (1 - (v-lo)/(hi-lo)); }
 
-      // 0%基準線
-      svg.appendChild(el('line', {x1:padL, x2:W-padR, y1:y(0), y2:y(0), stroke:'var(--baseline)', 'stroke-width':1}));
-      axisLabel(svg, padL-6, y(0)+3, '0%');
-      [lo+pad, hi-pad].forEach((v) => { axisLabel(svg, padL-6, y(v)+3, fmt(v,1)+'%'); });
+      [lo+pad, (lo+hi)/2, hi-pad].forEach((v) => {
+        svg.appendChild(el('line', {x1:padL, x2:W-padR, y1:y(v), y2:y(v), stroke:'var(--grid)', 'stroke-width':1}));
+        axisLabel(svg, padL-6, y(v)+3, fmt(v,0));
+      });
 
       // key對應的值可能是null(例如種子樣本或抓取失敗的日子沒有ADR類比估計資料)，
       // 沿用主K線圖MA線的畫法：遇到null就斷開，下一個有值的點重新用M開始新的線段，
@@ -1043,13 +1044,13 @@
         if (dashed) attrs['stroke-dasharray'] = '4,3';
         svg.appendChild(el('path', attrs));
       }
-      drawLine('predictedGapPct', 'var(--muted)', true);
-      if (hasAnalog) drawLine('analogGapPct', 'var(--ma5)', false);
-      drawLine('actualGapPct', 'var(--up)', false);
+      drawLine('predictedPrice', 'var(--muted)', true);
+      if (hasAnalog) drawLine('analogPrice', 'var(--ma5)', false);
+      drawLine('actualPrice', 'var(--up)', false);
 
-      // 實際缺口%的每個點依方向命中與否上色；種子樣本(回溯試算)用空心點跟即時預測區分。
+      // 收盤價的每個點依方向命中與否上色；種子樣本(回溯試算)用空心點跟即時預測區分。
       series.forEach((s,i) => {
-        const cx = xs(i), cy = y(s.actualGapPct);
+        const cx = xs(i), cy = y(s.actualPrice);
         const color = s.directionHit ? 'var(--good)' : 'var(--critical)';
         svg.appendChild(el('circle', { cx, cy, r: 3, fill: s.seeded ? 'var(--surface-1)' : color, stroke: color, 'stroke-width': s.seeded ? 1.5 : 0 }));
       });
@@ -1060,9 +1061,9 @@
         axisLabel(svg, xs(i), H-4, series[i].date.slice(5), 'middle');
       }
 
-      const legendDefs = [['預測缺口%','var(--muted)']];
-      if (hasAnalog) legendDefs.push(['ADR類比估計缺口%','var(--ma5)']);
-      legendDefs.push(['實際缺口%','var(--up)'],['方向命中','var(--good)'],['方向未命中','var(--critical)']);
+      const legendDefs = [['盤前股價預測','var(--muted)']];
+      if (hasAnalog) legendDefs.push(['ADR歷史相近價位','var(--ma5)']);
+      legendDefs.push(['收盤價','var(--up)'],['方向命中','var(--good)'],['方向未命中','var(--critical)']);
       legendDefs.forEach(([label,color]) => {
         const item = document.createElement('div'); item.className='legend-item';
         const sw = document.createElement('span'); sw.className='legend-swatch'; sw.style.background=color;
@@ -1091,13 +1092,13 @@
         dateEl.textContent = s.date + (s.seeded ? '（種子回溯樣本）' : '');
         tooltip.appendChild(dateEl);
         const rows = [
-          ['預測缺口%', (s.predictedGapPct>=0?'+':'')+fmt(s.predictedGapPct,2)+'%', 'var(--muted)'],
+          ['盤前股價預測', fmt(s.predictedPrice,0)+' 元', 'var(--muted)'],
         ];
-        if (s.analogGapPct != null) {
-          rows.push(['ADR類比估計缺口%', (s.analogGapPct>=0?'+':'')+fmt(s.analogGapPct,2)+'%', 'var(--ma5)']);
+        if (s.analogPrice != null) {
+          rows.push(['ADR歷史相近價位', fmt(s.analogPrice,0)+' 元', 'var(--ma5)']);
         }
         rows.push(
-          ['實際缺口%', (s.actualGapPct>=0?'+':'')+fmt(s.actualGapPct,2)+'%', s.directionHit ? 'var(--good)' : 'var(--critical)'],
+          ['收盤價', fmt(s.actualPrice,0)+' 元', s.directionHit ? 'var(--good)' : 'var(--critical)'],
           ['方向', s.directionHit ? '命中' : '未命中', null],
         );
         rows.forEach(([k,v,color])=>{

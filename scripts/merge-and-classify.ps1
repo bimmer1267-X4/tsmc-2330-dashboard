@@ -578,15 +578,22 @@ function Get-PredictionAccuracySummary($History) {
     foreach ($k in $windows.Keys) { if ($null -ne $windows[$k]) { $anyVisible = $true } }
     if (-not $anyVisible) { return $null }
 
+    # 走勢圖改用實際價位(元)而不是缺口%——「盤前股價預測」「ADR歷史相近價位類比估計」都已經
+    # 有現成的價格欄位(predictedOpen/analogEstimate.avgTwOpen)，「收盤價」也已經存在
+    # actual.close，直接三條線都用價位表示，比缺口%更直觀。缺口%欄位還是保留供tooltip參考。
     $seriesCount = [math]::Min($AccuracyRecentSeriesLimit, $resolved.Count)
     $recentSeries = @($resolved[($resolved.Count - $seriesCount)..($resolved.Count - 1)] | ForEach-Object {
         $analogGapPct = if ($_.analogEstimate -and $_.analogEstimate.actual) { $_.analogEstimate.actual.analogGapPct } else { $null }
+        $analogPrice = if ($_.analogEstimate) { $_.analogEstimate.avgTwOpen } else { $null }
         [PSCustomObject]@{
             date = $_.date
+            predictedPrice = $_.predictedOpen
             predictedGapPct = $_.predictedGapPct
+            analogPrice = $analogPrice
+            analogGapPct = $analogGapPct
+            actualPrice = $_.actual.close
             actualGapPct = $_.actual.actualGapPct
             directionHit = $_.actual.directionHit
-            analogGapPct = $analogGapPct
             seeded = ($_.seeded -eq $true)
         }
     })

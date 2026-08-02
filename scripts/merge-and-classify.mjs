@@ -580,12 +580,19 @@ function computePredictionAccuracySummary(history) {
 
   if (Object.values(windows).every((w) => w == null)) return null;
 
+  // 走勢圖改用實際價位(元)而不是缺口%——「盤前股價預測」「ADR歷史相近價位類比估計」都已經
+  // 有現成的價格欄位(predictedOpen/analogEstimate.avgTwOpen)，「收盤價」也已經存在
+  // actual.close，直接三條線都用價位表示，比缺口%更直觀。缺口%欄位還是保留(gapPct結尾)，
+  // 供tooltip需要時參考用，不強制只能二選一。
   const recentSeries = resolved.slice(-ACCURACY_RECENT_SERIES_LIMIT).map((h) => ({
     date: h.date,
+    predictedPrice: h.predictedOpen,
     predictedGapPct: h.predictedGapPct,
+    analogPrice: h.analogEstimate ? h.analogEstimate.avgTwOpen : null,
+    analogGapPct: h.analogEstimate && h.analogEstimate.actual ? h.analogEstimate.actual.analogGapPct : null,
+    actualPrice: h.actual.close,
     actualGapPct: h.actual.actualGapPct,
     directionHit: h.actual.directionHit,
-    analogGapPct: h.analogEstimate && h.analogEstimate.actual ? h.analogEstimate.actual.analogGapPct : null,
     seeded: h.seeded === true,
   }));
 
