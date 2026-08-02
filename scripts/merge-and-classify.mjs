@@ -451,6 +451,7 @@ function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model) {
       residualStd: round(model.residualStd, 4),
       confidenceIndexPct: modelTier >= 2 ? round(Math.max(0, model.adjR2) * 100, 1) : null,
       seeded: true,
+      analogEstimate: null,
       actual: {
         open: pair.actualOpen,
         close: pair.actualClose,

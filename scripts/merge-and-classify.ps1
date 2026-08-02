@@ -436,6 +436,7 @@ function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Mod
             residualStd = [math]::Round($Model.residualStd, 4)
             confidenceIndexPct = $confidenceIndexPct
             seeded = $true
+            analogEstimate = $null
             actual = [PSCustomObject]@{
                 open = $pair.actualOpen
                 close = $pair.actualClose
