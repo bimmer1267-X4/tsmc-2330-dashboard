@@ -181,6 +181,27 @@
   </div>
 </div>
 
+<div class="card" id="prediction-accuracy-card">
+  <div style="font-weight:600; margin-bottom:2px;">開盤價預測準確度追蹤 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
+  <div class="sub">追蹤「今日台股開盤價機率預估」過去交易日的預測結果 vs 實際開盤表現，評估模型方向命中率、平均誤差(偏誤)與信賴區間覆蓋率是否符合預期；樣本數不足時對應區間會先隱藏，避免早期少量樣本產生誤導性統計</div>
+  <div class="legend" id="accuracy-chart-legend"></div>
+  <div class="chart-wrap"><svg id="chart-prediction-accuracy" width="100%" viewBox="0 0 900 160" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-prediction-accuracy"></div></div>
+  <div id="accuracy-window-last30">
+    <div style="font-weight:600; font-size:13px; margin:14px 0 4px;">近30個交易日</div>
+    <div class="metrics" id="accuracy-metrics-last30"></div>
+  </div>
+  <div id="accuracy-window-last90">
+    <div style="font-weight:600; font-size:13px; margin:14px 0 4px;">近90個交易日</div>
+    <div class="metrics" id="accuracy-metrics-last90"></div>
+  </div>
+  <div id="accuracy-window-sinceInception">
+    <div style="font-weight:600; font-size:13px; margin:14px 0 4px;">累計至今</div>
+    <div class="metrics" id="accuracy-metrics-sinceInception"></div>
+  </div>
+  <div class="src" id="accuracy-seed-note"></div>
+  <div class="src">誤差% = 預測缺口% − 實際缺口%（正值代表模型偏樂觀/高估，負值代表偏保守/低估）；68%/95%信賴區間覆蓋率理想上應分別接近68%/95%，明顯偏低代表模型低估了不確定性。⚠️ 純統計回顧，不構成投資建議。</div>
+</div>
+
 <div class="card">
   <div style="font-weight:600; margin-bottom:2px;">全年預估EPS估值（Forward PE／PEG） <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
   <div class="sub">Trailing PE偏落後（含去年較弱季度），對高成長股改用前瞻本益比與PEG更能反映真實貴賤程度</div>
@@ -927,6 +948,137 @@
         ['Histogram', fmt(ind[i].histogram,2), null]
       ]
     }));
+  })();
+
+  // ---- 開盤價預測準確度追蹤 ----
+  // 放在這裡（而不是跟其他卡片一起靠前）是因為畫走勢圖需要用到padL/el/axisLabel這幾個
+  // 共用繪圖helper，它們定義在上面主K線圖那段之後；提早放會在這些helper初始化之前就
+  // 執行到，觸發TDZ的ReferenceError。metrics grid的部分雖然不需要這些helper，但為了
+  // 卡片邏輯完整放在同一個IIFE裡，一起挪到這裡。
+  (function(){
+    const acc = raw.predictionAccuracySummary;
+    const card = document.getElementById('prediction-accuracy-card');
+    if (!acc) { if (card) card.style.display = 'none'; return; }
+
+    const windowConfigs = [
+      ['last30', 'accuracy-window-last30', 'accuracy-metrics-last30'],
+      ['last90', 'accuracy-window-last90', 'accuracy-metrics-last90'],
+      ['sinceInception', 'accuracy-window-sinceInception', 'accuracy-metrics-sinceInception'],
+    ];
+    let anyVisible = false;
+    windowConfigs.forEach(([key, sectionId, gridId]) => {
+      const w = acc.windows[key];
+      const section = document.getElementById(sectionId);
+      if (!w) { section.style.display = 'none'; return; }
+      anyVisible = true;
+      section.style.display = '';
+      renderMetricsGrid(gridId, [
+        ['方向命中率', fmt(w.directionHitRatePct,1)+'%'],
+        ['平均誤差(偏誤)', (w.meanErrorPct>=0?'+':'')+fmt(w.meanErrorPct,2)+'%'],
+        ['平均絕對誤差', fmt(w.meanAbsErrorPct,2)+'%'],
+        ['68%信賴區間覆蓋率', fmt(w.ci68CoveragePct,1)+'%'],
+        ['95%信賴區間覆蓋率', fmt(w.ci95CoveragePct,1)+'%'],
+        ['樣本數', w.sampleSize+' 筆'],
+      ]);
+    });
+    if (!anyVisible) { if (card) card.style.display = 'none'; return; }
+
+    const seededCount = (acc.recentSeries || []).filter((s) => s.seeded).length;
+    document.getElementById('accuracy-seed-note').textContent = seededCount > 0
+      ? '⚠️ 其中 ' + seededCount + ' 筆(圖表上以空心點標示)為上線當天用歷史資料回溯試算的種子樣本，模型係數已經看過這幾天的結果，不是真正的即時盲測，之後累積的樣本才是模型的真實線上表現。'
+      : '';
+
+    // ---- 預測 vs 實際缺口% 走勢圖 ----
+    // 樣本數跟主K線圖(daily.length)不同，不能沿用全域的n/xScale/attachHoverTooltip
+    // (它們是綁定daily.length的)，這裡自己建一份局部的座標尺度與十字線互動邏輯，
+    // 畫法沿用chart-price那段inline crosshair的寫法。
+    const series = acc.recentSeries || [];
+    const svg = document.getElementById('chart-prediction-accuracy');
+    const legend = document.getElementById('accuracy-chart-legend');
+    if (series.length < 2) {
+      if (svg) svg.parentElement.style.display = 'none';
+    } else {
+      const W = 900, H = 160, padT = 10, padB = 20;
+      const m = series.length;
+      function xs(i) { return padL + (W-padL-padR) * (i / Math.max(m-1,1)); }
+      let lo = Infinity, hi = -Infinity;
+      series.forEach((s) => { lo = Math.min(lo, s.predictedGapPct, s.actualGapPct); hi = Math.max(hi, s.predictedGapPct, s.actualGapPct); });
+      if (lo === hi) { lo -= 1; hi += 1; }
+      const pad = (hi-lo)*0.12; lo -= pad; hi += pad;
+      function y(v) { return padT + (H-padT-padB) * (1 - (v-lo)/(hi-lo)); }
+
+      // 0%基準線
+      svg.appendChild(el('line', {x1:padL, x2:W-padR, y1:y(0), y2:y(0), stroke:'var(--baseline)', 'stroke-width':1}));
+      axisLabel(svg, padL-6, y(0)+3, '0%');
+      [lo+pad, hi-pad].forEach((v) => { axisLabel(svg, padL-6, y(v)+3, fmt(v,1)+'%'); });
+
+      function drawLine(key, colorVar, dashed) {
+        let d = '';
+        series.forEach((s,i) => { const cmd = d ? 'L' : 'M'; d += cmd+' '+xs(i)+','+y(s[key])+' '; });
+        const attrs = {d, fill:'none', stroke:colorVar, 'stroke-width':2, 'stroke-linejoin':'round', 'stroke-linecap':'round'};
+        if (dashed) attrs['stroke-dasharray'] = '4,3';
+        svg.appendChild(el('path', attrs));
+      }
+      drawLine('predictedGapPct', 'var(--muted)', true);
+      drawLine('actualGapPct', 'var(--up)', false);
+
+      // 實際缺口%的每個點依方向命中與否上色；種子樣本(回溯試算)用空心點跟即時預測區分。
+      series.forEach((s,i) => {
+        const cx = xs(i), cy = y(s.actualGapPct);
+        const color = s.directionHit ? 'var(--good)' : 'var(--critical)';
+        svg.appendChild(el('circle', { cx, cy, r: 3, fill: s.seeded ? 'var(--surface-1)' : color, stroke: color, 'stroke-width': s.seeded ? 1.5 : 0 }));
+      });
+
+      // x-axis date labels
+      const step = Math.max(1, Math.round(m/6));
+      for (let i=0;i<m;i+=step) {
+        axisLabel(svg, xs(i), H-4, series[i].date.slice(5), 'middle');
+      }
+
+      [['預測缺口%','var(--muted)'],['實際缺口%','var(--up)'],['方向命中','var(--good)'],['方向未命中','var(--critical)']].forEach(([label,color]) => {
+        const item = document.createElement('div'); item.className='legend-item';
+        const sw = document.createElement('span'); sw.className='legend-swatch'; sw.style.background=color;
+        const t = document.createElement('span'); t.textContent = label;
+        item.appendChild(sw); item.appendChild(t); legend.appendChild(item);
+      });
+
+      const tooltip = document.getElementById('tooltip-prediction-accuracy');
+      const hitRect = el('rect', {x:padL, y:0, width:W-padL-padR, height:H, fill:'transparent'});
+      svg.appendChild(hitRect);
+      const crosshair = el('line', {x1:0,x2:0,y1:padT,y2:H-padB, stroke:'var(--baseline)', 'stroke-width':1, visibility:'hidden'});
+      svg.appendChild(crosshair);
+      function onMove(evt) {
+        const rect = svg.getBoundingClientRect();
+        const px = (evt.clientX - rect.left) / rect.width * W;
+        let i = Math.round((px - padL) / (W - padL - padR) * (m-1));
+        i = Math.max(0, Math.min(m-1, i));
+        const cx = xs(i);
+        crosshair.setAttribute('x1', cx); crosshair.setAttribute('x2', cx); crosshair.setAttribute('visibility','visible');
+        const s = series[i];
+        tooltip.style.display = 'block';
+        tooltip.style.left = Math.min(rect.width-190, Math.max(0,(px/W)*rect.width+10)) + 'px';
+        tooltip.style.top = '10px';
+        tooltip.innerHTML = '';
+        const dateEl = document.createElement('div'); dateEl.className='t-date';
+        dateEl.textContent = s.date + (s.seeded ? '（種子回溯樣本）' : '');
+        tooltip.appendChild(dateEl);
+        const rows = [
+          ['預測缺口%', (s.predictedGapPct>=0?'+':'')+fmt(s.predictedGapPct,2)+'%', 'var(--muted)'],
+          ['實際缺口%', (s.actualGapPct>=0?'+':'')+fmt(s.actualGapPct,2)+'%', s.directionHit ? 'var(--good)' : 'var(--critical)'],
+          ['方向', s.directionHit ? '命中' : '未命中', null],
+        ];
+        rows.forEach(([k,v,color])=>{
+          const row = document.createElement('div'); row.className='t-row';
+          const kEl = document.createElement('span'); kEl.className='k';
+          if (color) { const key = document.createElement('span'); key.className='tkey'; key.style.background=color; kEl.appendChild(key); }
+          const kt = document.createElement('span'); kt.textContent = k; kEl.appendChild(kt);
+          const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = v;
+          row.appendChild(kEl); row.appendChild(vEl); tooltip.appendChild(row);
+        });
+      }
+      svg.addEventListener('pointermove', onMove);
+      svg.addEventListener('pointerleave', () => { tooltip.style.display='none'; crosshair.setAttribute('visibility','hidden'); });
+    }
   })();
 
   // ---- screen-reader table (accessibility: table view of underlying data) ----

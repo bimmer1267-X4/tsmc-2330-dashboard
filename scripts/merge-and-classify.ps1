@@ -8,6 +8,9 @@
   相近價位類比估計卡片本身這兩個既有功能仍只看近6個月。
   另外會把ADR溢價率逐日累積寫進 data\adr-premium-history.json（永久保留，不像
   data.json只留近6個月滾動視窗），是雙變數迴歸模型的訓練資料來源之一。
+  同時把每天的開盤價預測、以及後續回填的實際開盤/收盤結果，永久累積寫進
+  data\prediction-accuracy-history.json，供長期追蹤模型的方向命中率/誤差(偏誤)/
+  信賴區間覆蓋率是否符合預期，聚合摘要寫進 data.json 的 predictionAccuracySummary。
 
   用法（手動交叉比對）：
     .\merge-and-classify.ps1 -AdrPrice 424.61 -AdrChangePct 5.55 -AdrQuoteTime "2026-07-21T16:00:00-04:00" `
@@ -35,6 +38,12 @@ $MinRegressionSamplesV2 = 60
 $MinRegressionSamplesV3 = 80
 $PremiumRollWindowDays = 60
 $PremiumHistoryPath = Join-Path $PSScriptRoot "..\data\adr-premium-history.json"
+$PredictionHistoryPath = Join-Path $PSScriptRoot "..\data\prediction-accuracy-history.json"
+# 開盤價預測準確度追蹤：統計區間樣本數低於這個門檻就不顯示；前端折線圖只取最近這麼多筆
+# 已解析的紀錄(有界)；資料庫是空檔案時，用最近這麼多個歷史訓練配對回溯種一批初始樣本。
+$MinAccuracySamples = 10
+$AccuracyRecentSeriesLimit = 120
+$AccuracySeedCount = 5
 
 # 抓取 Yahoo Finance 每日收盤序列。除了回傳最新報價(price/changePct/quoteTime)，也回傳
 # 完整每日收盤序列(Series)，供「ADR vs 開盤缺口」迴歸訓練使用，避免重複發送請求。
@@ -344,6 +353,200 @@ function Update-AdrPremiumHistory($TwDaily, $AdrDaily, $FxDaily, [double]$Ratio)
     return $merged
 }
 
+# 把 $OpenPrediction（三/雙/單變數三種形狀之一）攤平成「開盤價預測準確度追蹤」歷史紀錄
+# 的固定schema。basisPremiumDevPct/basisAnalogGapPct/confidenceIndexPct在單變數(甚至雙
+# 變數)版本可能不存在——PowerShell存取PSCustomObject不存在的屬性會直接回傳$null，效果
+# 跟.mjs版本的 ?? null 一樣，不用另外判斷。
+function New-PredictionHistoryEntry($OpenPrediction, [int]$ModelTier, [string]$PredictedDateStr, [string]$PredictedAt, [bool]$Seeded = $false) {
+    $m = $OpenPrediction.model
+    return [PSCustomObject]@{
+        date = $PredictedDateStr
+        predictedAt = $PredictedAt
+        modelTier = $ModelTier
+        predictedGapPct = $OpenPrediction.predictedGapPct
+        predictedOpen = $OpenPrediction.predictedOpen
+        ci68 = [PSCustomObject]@{ low = $OpenPrediction.ci68.low; high = $OpenPrediction.ci68.high }
+        ci95 = [PSCustomObject]@{ low = $OpenPrediction.ci95.low; high = $OpenPrediction.ci95.high }
+        probUpPct = $OpenPrediction.probUpPct
+        basisAdrChangePct = $OpenPrediction.basisAdrChangePct
+        basisPremiumDevPct = $OpenPrediction.basisPremiumDevPct
+        basisAnalogGapPct = $OpenPrediction.basisAnalogGapPct
+        basisPrevClose = $OpenPrediction.basisPrevClose
+        residualStd = $m.residualStd
+        confidenceIndexPct = $m.confidenceIndexPct
+        seeded = $Seeded
+        actual = $null
+    }
+}
+
+# 依模型層級把訓練配對(Pair: {adrChangePct, premiumDev?, analogGapPct?})套進對應的迴歸公式，
+# 算出「如果那天用這個(已經擬合好的)模型會預測出的開盤缺口%」——只給「種子回溯」使用，
+# 邏輯跟main()裡即時預測套用係數的算法完全一致，只是輸入換成歷史配對而不是「今天」的值。
+function Get-PredictedGapPctForTier($Pair, [int]$ModelTier, $Model) {
+    if ($ModelTier -eq 3) {
+        return $Model.beta[0] + $Model.beta[1] * $Pair.adrChangePct + $Model.beta[2] * $Pair.premiumDev + $Model.beta[3] * $Pair.analogGapPct
+    }
+    if ($ModelTier -eq 2) {
+        return $Model.b0 + $Model.b1 * $Pair.adrChangePct + $Model.b2 * $Pair.premiumDev
+    }
+    return $Model.beta * $Pair.adrChangePct + $Model.alpha
+}
+
+# 開盤價預測準確度追蹤：資料庫是空檔案時，借用訓練配對(ModelPairs)裡最近AccuracySeedCount
+# 筆，套用這次擬合好的模型係數反推出「如果那天這樣預測，結果會是多少」，直接連同已知的
+# 實際結果一起寫入，標記seeded:true。⚠️ 限制：這幾筆用的是「看過完整1年資料後」擬合出的
+# 係數回推，係數本身有看過這幾天(輕微樣本內偏差)，不是真正blind的即時預測——之後每天
+# 新增的才是真正的即時預測，前端會分開標示。
+function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Model) {
+    if ($History.Count -gt 0 -or $null -eq $ModelPairs -or $ModelPairs.Count -eq 0) { return @() }
+    $count = [math]::Min($AccuracySeedCount, $ModelPairs.Count)
+    $seeds = @($ModelPairs[($ModelPairs.Count - $count)..($ModelPairs.Count - 1)])
+    $now = (Get-Date).ToUniversalTime().ToString("o")
+    $result = @()
+    foreach ($pair in $seeds) {
+        $predictedGapPct = [math]::Round((Get-PredictedGapPctForTier $pair $ModelTier $Model), 2)
+        $priceAt = { param($gapPct) [math]::Round($pair.prevClose * (1 + $gapPct / 100), 2) }
+        $probUpPct = [math]::Round((Get-NormalCdf ($predictedGapPct / $Model.residualStd)) * 100, 1)
+        $actualGapPct = [math]::Round(($pair.actualOpen / $pair.prevClose - 1) * 100, 2)
+        $errorPct = [math]::Round($predictedGapPct - $actualGapPct, 2)
+        $ci68 = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $Model.residualStd)); high = (& $priceAt ($predictedGapPct + $Model.residualStd)) }
+        $ci95 = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - 1.96 * $Model.residualStd)); high = (& $priceAt ($predictedGapPct + 1.96 * $Model.residualStd)) }
+        $confidenceIndexPct = if ($ModelTier -ge 2) { [math]::Round(([math]::Max(0, $Model.adjR2)) * 100, 1) } else { $null }
+
+        $entry = [PSCustomObject]@{
+            date = $pair.twDate
+            predictedAt = $now
+            modelTier = $ModelTier
+            predictedGapPct = $predictedGapPct
+            predictedOpen = (& $priceAt $predictedGapPct)
+            ci68 = $ci68
+            ci95 = $ci95
+            probUpPct = $probUpPct
+            basisAdrChangePct = [math]::Round($pair.adrChangePct, 2)
+            basisPremiumDevPct = if ($ModelTier -ge 2) { [math]::Round($pair.premiumDev, 2) } else { $null }
+            basisAnalogGapPct = if ($ModelTier -ge 3) { [math]::Round($pair.analogGapPct, 2) } else { $null }
+            basisPrevClose = $pair.prevClose
+            residualStd = [math]::Round($Model.residualStd, 4)
+            confidenceIndexPct = $confidenceIndexPct
+            seeded = $true
+            actual = [PSCustomObject]@{
+                open = $pair.actualOpen
+                close = $pair.actualClose
+                actualGapPct = $actualGapPct
+                errorPct = $errorPct
+                absErrorPct = [math]::Round([math]::Abs($errorPct), 2)
+                directionHit = ([math]::Sign($predictedGapPct) -eq [math]::Sign($actualGapPct))
+                withinCi68 = ($pair.actualOpen -ge $ci68.low -and $pair.actualOpen -le $ci68.high)
+                withinCi95 = ($pair.actualOpen -ge $ci95.low -and $pair.actualOpen -le $ci95.high)
+                resolvedAt = $now
+            }
+        }
+        $result += $entry
+    }
+    return $result
+}
+
+# 開盤價預測準確度歷史：永久保留、逐日累積(跟Update-AdrPremiumHistory同一套
+# Test-Path/try-catch→hashtable upsert-by-date→sort→write模式)。每次執行做兩件事：
+# (1)回填先前已經記錄、但當時台股還沒收盤所以actual還是$null的舊項目；(2)如果這次有
+# 算出新預測(NewEntry非$null)，以actual:$null的狀態upsert進去，等未來的執行回填。
+function Update-PredictionAccuracyHistory($TwDaily, $NewEntry) {
+    $history = @()
+    if (Test-Path $PredictionHistoryPath) {
+        try { $history = @(Get-Content $PredictionHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+        catch { $history = @() }
+    }
+    $byDate = @{}
+    foreach ($h in $history) { $byDate[$h.date] = $h }
+
+    $twByDate = @{}
+    foreach ($t in $TwDaily) { $twByDate[$t.date] = $t }
+
+    $backfilled = 0
+    foreach ($entry in @($byDate.Values)) {
+        if ($null -ne $entry.actual) { continue }
+        if (-not $twByDate.ContainsKey($entry.date)) { continue }
+        $day = $twByDate[$entry.date]
+        $actualGapPct = [math]::Round(($day.open / $entry.basisPrevClose - 1) * 100, 2)
+        $errorPct = [math]::Round($entry.predictedGapPct - $actualGapPct, 2)
+        $entry.actual = [PSCustomObject]@{
+            open = $day.open
+            close = $day.close
+            actualGapPct = $actualGapPct
+            errorPct = $errorPct
+            absErrorPct = [math]::Round([math]::Abs($errorPct), 2)
+            directionHit = ([math]::Sign($entry.predictedGapPct) -eq [math]::Sign($actualGapPct))
+            withinCi68 = ($day.open -ge $entry.ci68.low -and $day.open -le $entry.ci68.high)
+            withinCi95 = ($day.open -ge $entry.ci95.low -and $day.open -le $entry.ci95.high)
+            resolvedAt = (Get-Date).ToUniversalTime().ToString("o")
+        }
+        $backfilled++
+    }
+
+    if ($null -ne $NewEntry) {
+        $existingActual = if ($byDate.ContainsKey($NewEntry.date)) { $byDate[$NewEntry.date].actual } else { $null }
+        $NewEntry.actual = $existingActual
+        $byDate[$NewEntry.date] = $NewEntry
+    }
+
+    $merged = @($byDate.Values | Sort-Object date)
+    $merged | ConvertTo-Json -Depth 6 -Compress | Out-File -FilePath $PredictionHistoryPath -Encoding utf8
+    $newNote = if ($NewEntry) { "，新增今日1筆" } else { "" }
+    Write-Host "已更新開盤價預測準確度歷史紀錄: $PredictionHistoryPath（累計 $($merged.Count) 筆，本次回填 $backfilled 筆$newNote）"
+    return $merged
+}
+
+# 把歷史紀錄彙總成前端要顯示的統計摘要：近30/近90個交易日、累計至今三個區間，各自算
+# 方向命中率/平均誤差(偏誤方向)/平均絕對誤差/68%與95%信賴區間覆蓋率。樣本數低於
+# MinAccuracySamples的區間回傳$null，前端對應區塊要隱藏，避免樣本太少時的統計沒有代表性。
+function Get-PredictionAccuracySummary($History) {
+    $resolved = @($History | Where-Object { $null -ne $_.actual } | Sort-Object date)
+    if ($resolved.Count -eq 0) { return $null }
+
+    $lookbacks = @(
+        @{ key = "last30"; label = "近30個交易日"; tradingDays = 30 },
+        @{ key = "last90"; label = "近90個交易日"; tradingDays = 90 },
+        @{ key = "sinceInception"; label = "累計至今"; tradingDays = [double]::PositiveInfinity }
+    )
+
+    $windows = [ordered]@{}
+    foreach ($w in $lookbacks) {
+        $slice = if ([double]::IsPositiveInfinity($w.tradingDays)) {
+            $resolved
+        } else {
+            $n = [math]::Min([int]$w.tradingDays, $resolved.Count)
+            @($resolved[($resolved.Count - $n)..($resolved.Count - 1)])
+        }
+        if ($slice.Count -lt $MinAccuracySamples) { $windows[$w.key] = $null; continue }
+        $windows[$w.key] = [PSCustomObject]@{
+            label = $w.label
+            sampleSize = $slice.Count
+            directionHitRatePct = [math]::Round((Get-Mean ($slice | ForEach-Object { if ($_.actual.directionHit) { 100.0 } else { 0.0 } })), 1)
+            meanErrorPct = [math]::Round((Get-Mean ($slice | ForEach-Object { $_.actual.errorPct })), 2)
+            meanAbsErrorPct = [math]::Round((Get-Mean ($slice | ForEach-Object { $_.actual.absErrorPct })), 2)
+            ci68CoveragePct = [math]::Round((Get-Mean ($slice | ForEach-Object { if ($_.actual.withinCi68) { 100.0 } else { 0.0 } })), 1)
+            ci95CoveragePct = [math]::Round((Get-Mean ($slice | ForEach-Object { if ($_.actual.withinCi95) { 100.0 } else { 0.0 } })), 1)
+        }
+    }
+
+    $anyVisible = $false
+    foreach ($k in $windows.Keys) { if ($null -ne $windows[$k]) { $anyVisible = $true } }
+    if (-not $anyVisible) { return $null }
+
+    $seriesCount = [math]::Min($AccuracyRecentSeriesLimit, $resolved.Count)
+    $recentSeries = @($resolved[($resolved.Count - $seriesCount)..($resolved.Count - 1)] | ForEach-Object {
+        [PSCustomObject]@{
+            date = $_.date
+            predictedGapPct = $_.predictedGapPct
+            actualGapPct = $_.actual.actualGapPct
+            directionHit = $_.actual.directionHit
+            seeded = ($_.seeded -eq $true)
+        }
+    })
+
+    return [PSCustomObject]@{ resolvedSampleSize = $resolved.Count; windows = $windows; recentSeries = $recentSeries }
+}
+
 # 用近6個月 ADR(TSM)/USD-TWD/台股日K，訓練「ADR單日漲跌% → 台股隔日開盤缺口%」OLS迴歸。
 function Get-OpenGapModel($adrSeries, $fxSeries, $twDaily) {
     $adrMap = @{}; foreach ($s in $adrSeries) { $adrMap[$s.date] = $s.close }
@@ -369,7 +572,7 @@ function Get-OpenGapModel($adrSeries, $fxSeries, $twDaily) {
         $twOpenGapPct = ($T.open / $Tprev.close - 1) * 100
 
         # 同一台股交易日可能對應多個ADR日期，只留每個台股交易日最後一筆
-        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; twOpenGapPct = $twOpenGapPct }
+        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
     }
 
     $uniq = @($pairsByTwDate.Values)
@@ -383,7 +586,9 @@ function Get-OpenGapModel($adrSeries, $fxSeries, $twDaily) {
     $hitCount = @($uniq | Where-Object { [math]::Sign($_.adrChangePct) -eq [math]::Sign($_.twOpenGapPct) -and $_.adrChangePct -ne 0 }).Count
     $hitRate = $hitCount / $uniq.Count
 
-    return [PSCustomObject]@{ beta = $reg.beta; alpha = $reg.alpha; r = $reg.r; r2 = $reg.r2; n = $reg.n; residualStd = $residualStd; hitRate = $hitRate }
+    # pairs依twDate排序後回傳，供「開盤價預測準確度追蹤」的種子回溯邏輯取「最近幾筆」用。
+    $pairsSorted = @($uniq | Sort-Object twDate)
+    return [PSCustomObject]@{ beta = $reg.beta; alpha = $reg.alpha; r = $reg.r; r2 = $reg.r2; n = $reg.n; residualStd = $residualStd; hitRate = $hitRate; pairs = $pairsSorted }
 }
 
 # 雙變數版本：「ADR單日漲跌% + ADR溢價率偏離近期均值」→ 台股隔日開盤缺口%。配對邏輯
@@ -428,7 +633,7 @@ function Get-OpenGapModelV2($adrSeries, $fxSeries, $twDaily, $PremiumHistory, [i
         $rollMean = Get-Mean $window
         $premiumDev = $premiumByDate[$Tprev.date] - $rollMean
 
-        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; premiumDev = $premiumDev; twOpenGapPct = $twOpenGapPct }
+        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; premiumDev = $premiumDev; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
     }
 
     $uniq = @($pairsByTwDate.Values)
@@ -443,10 +648,11 @@ function Get-OpenGapModelV2($adrSeries, $fxSeries, $twDaily, $PremiumHistory, [i
     $hitCount = @($uniq | Where-Object { [math]::Sign($_.adrChangePct) -eq [math]::Sign($_.twOpenGapPct) -and $_.adrChangePct -ne 0 }).Count
     $hitRate = $hitCount / $uniq.Count
 
+    $pairsSorted = @($uniq | Sort-Object twDate)
     return [PSCustomObject]@{
         b0 = $reg.b0; b1 = $reg.b1; b2 = $reg.b2; r2 = $reg.r2; adjR2 = $reg.adjR2; n = $reg.n
         tB1 = $reg.tB1; tB2 = $reg.tB2; pB1 = $reg.pB1; pB2 = $reg.pB2
-        residualStd = $residualStd; hitRate = $hitRate
+        residualStd = $residualStd; hitRate = $hitRate; pairs = $pairsSorted
     }
 }
 
@@ -552,7 +758,7 @@ function Get-OpenGapModelV3($adrSeries, $fxSeries, $twDaily, $PremiumHistory, [i
         if ($null -eq $analog) { continue }
         $analogGapPct = ($analog.avgTwOpen / $Tprev.close - 1) * 100
 
-        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; premiumDev = $premiumDev; analogGapPct = $analogGapPct; twOpenGapPct = $twOpenGapPct }
+        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrChangePct = $adrChangePct; premiumDev = $premiumDev; analogGapPct = $analogGapPct; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
     }
 
     $uniq = @($pairsByTwDate.Values)
@@ -566,9 +772,10 @@ function Get-OpenGapModelV3($adrSeries, $fxSeries, $twDaily, $PremiumHistory, [i
     $hitCount = @($uniq | Where-Object { [math]::Sign($_.adrChangePct) -eq [math]::Sign($_.twOpenGapPct) -and $_.adrChangePct -ne 0 }).Count
     $hitRate = $hitCount / $uniq.Count
 
+    $pairsSorted = @($uniq | Sort-Object twDate)
     return [PSCustomObject]@{
         beta = $reg.beta; se = $reg.se; t = $reg.t; p = $reg.p; r2 = $reg.r2; adjR2 = $reg.adjR2; n = $reg.n
-        residualStd = $residualStd; hitRate = $hitRate
+        residualStd = $residualStd; hitRate = $hitRate; pairs = $pairsSorted
     }
 }
 
@@ -764,8 +971,10 @@ if (Test-Path $configPath) {
 # 直接消失——這些退回路徑理論上只有在資料還在累積的最初期間才會用到，1年回填後樣本數
 # 已經足夠，正常情況下應該都會走三變數模型。
 $openPrediction = $null
+$predicted = $false
+$predictionTier = $null
+$predictionModel = $null
 if ($adrDaily -and $fxDaily) {
-    $predicted = $false
     $twForModel = if ($twDaily1y.Count -gt 0) { $twDaily1y } else { $d.daily }
 
     try {
@@ -813,6 +1022,8 @@ if ($adrDaily -and $fxDaily) {
             }
             $d | Add-Member -NotePropertyName openPrediction -NotePropertyValue $openPrediction -Force
             $predicted = $true
+            $predictionTier = 3
+            $predictionModel = $model3
             Write-Host "開盤價機率預估(三變數): 缺口$($openPrediction.predictedGapPct)%  預估開盤價$($openPrediction.predictedOpen)  上漲機率$($probUpPct)%（調整後R²=$([math]::Round($model3.adjR2,3)), n=$($model3.n), 類比缺口t值=$([math]::Round($model3.t[3],2))）"
         }
     } catch {
@@ -858,6 +1069,8 @@ if ($adrDaily -and $fxDaily) {
                 }
                 $d | Add-Member -NotePropertyName openPrediction -NotePropertyValue $openPrediction -Force
                 $predicted = $true
+                $predictionTier = 2
+                $predictionModel = $model2
                 Write-Host "開盤價機率預估(雙變數退回): 缺口$($openPrediction.predictedGapPct)%  預估開盤價$($openPrediction.predictedOpen)  上漲機率$($probUpPct)%（調整後R²=$([math]::Round($model2.adjR2,3)), n=$($model2.n)）"
             }
         } catch {
@@ -891,6 +1104,8 @@ if ($adrDaily -and $fxDaily) {
                 }
                 $d | Add-Member -NotePropertyName openPrediction -NotePropertyValue $openPrediction -Force
                 $predicted = $true
+                $predictionTier = 1
+                $predictionModel = $model
                 Write-Host "開盤價機率預估(單變數退回): 缺口$($openPrediction.predictedGapPct)%  預估開盤價$($openPrediction.predictedOpen)  上漲機率$($probUpPct)%（R²=$([math]::Round($model.r2,2)), n=$($model.n)）"
             }
         } catch {
@@ -900,6 +1115,44 @@ if ($adrDaily -and $fxDaily) {
 
     if (-not $predicted) {
         Write-Warning "三/雙/單變數模型可用樣本數皆不足，略過開盤價機率預估"
+    }
+}
+
+# ---- 開盤價預測準確度追蹤 ----
+# 不論這次是否成功算出新預測，只要有抓到近1年台股日K，就先回填先前未解析的舊紀錄
+# （所以特意放在if ($adrDaily -and $fxDaily)區塊外面，即使ADR/匯率當次抓取失敗，仍然
+# 可以用這次的台股日K把之前累積的未解析紀錄回填掉，不用等到下次ADR恢復正常才回填）；
+# 今天的新預測（若有算出來）另外併入同一次寫檔。資料庫還是空檔案時，先用最近幾筆訓練
+# 配對種一批初始樣本，讓卡片一上線就有資料可看。
+if ($twDaily1y.Count -gt 0) {
+    try {
+        $history = @()
+        if (Test-Path $PredictionHistoryPath) {
+            try { $history = @(Get-Content $PredictionHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+            catch { $history = @() }
+        }
+        $seeds = if ($predictionModel) { New-PredictionHistorySeeds $history $predictionModel.pairs $predictionTier $predictionModel } else { @() }
+
+        # 用DateTimeOffset::Parse明確解析ISO時間字串裡的時區資訊(而不是Get-Date隱含依賴
+        # 系統當地文化/時區設定)，確保不論執行環境的系統時區為何，都能正確換算成UTC後
+        # +8小時得到台北日期，行為跟.mjs版本(new Date(...).getTime() + 8*3600*1000)一致。
+        $predictedDateStr = ([datetimeoffset]::Parse($d.generatedAt)).UtcDateTime.AddHours(8).ToString("yyyy-MM-dd")
+        $newEntry = if ($predicted) { New-PredictionHistoryEntry $openPrediction $predictionTier $predictedDateStr $d.generatedAt } else { $null }
+
+        # 種子樣本直接寫進同一份歷史（在Update-PredictionAccuracyHistory做回填/upsert之前），
+        # 這樣今天這次執行內，種子樣本也會一併被回填邏輯掃過（雖然種子樣本本來就已經有
+        # actual了，掃過也不會被覆蓋，因為回填邏輯只處理actual為$null的項目）。
+        if ($seeds.Count -gt 0) {
+            $history = @($history) + @($seeds)
+            $history | ConvertTo-Json -Depth 6 -Compress | Out-File -FilePath $PredictionHistoryPath -Encoding utf8
+            Write-Host "開盤價預測準確度歷史紀錄為空，已用最近$($seeds.Count)筆訓練配對回溯種子樣本（標記seeded:true）"
+        }
+
+        $predictionHistory = Update-PredictionAccuracyHistory $twDaily1y $newEntry
+        $summary = Get-PredictionAccuracySummary $predictionHistory
+        if ($summary) { $d | Add-Member -NotePropertyName predictionAccuracySummary -NotePropertyValue $summary -Force }
+    } catch {
+        Write-Warning "開盤價預測準確度歷史紀錄更新失敗，略過: $($_.Exception.Message)"
     }
 }
 
