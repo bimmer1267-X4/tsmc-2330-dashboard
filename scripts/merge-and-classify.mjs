@@ -423,6 +423,10 @@ function predictGapPctForTier(pair, modelTier, model) {
 // ⚠️ 限制：這幾筆用的是「看過完整1年資料後」擬合出的係數回推，係數本身有看過這幾天
 // (輕微樣本內偏差)，不是真正blind的即時預測——之後每天新增的才是真正的即時預測，
 // 前端會分開標示，不能把種子樣本的準確度直接當作模型的真實線上表現。
+// 「準確度」刻意拿收盤價(pair.actualClose)驗證，不是開盤價(pair.actualOpen)——雖然「盤前
+// 股價預測」跟「ADR歷史相近價位類比估計」這兩個方法本身預測的目標是開盤價，但使用者要
+// 用當日收盤價當作最終驗證基準，所以這裡的誤差/命中率包含了開盤後到收盤的盤中變動，
+// 不是純粹的開盤價預測誤差。open/close兩個原始值都照樣存進actual裡供參考。
 function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model) {
   if (history.length > 0 || !modelPairs || modelPairs.length === 0) return [];
   const seeds = modelPairs.slice(-ACCURACY_SEED_COUNT);
@@ -431,7 +435,7 @@ function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model) {
     const predictedGapPct = round(predictGapPctForTier(pair, modelTier, model), 2);
     const priceAt = (gapPct) => round(pair.prevClose * (1 + gapPct / 100), 2);
     const probUpPct = round(normalCdf(predictedGapPct / model.residualStd) * 100, 1);
-    const actualGapPct = round((pair.actualOpen / pair.prevClose - 1) * 100, 2);
+    const actualGapPct = round((pair.actualClose / pair.prevClose - 1) * 100, 2);
     const errorPct = round(predictedGapPct - actualGapPct, 2);
     const ci68 = { low: priceAt(predictedGapPct - model.residualStd), high: priceAt(predictedGapPct + model.residualStd) };
     const ci95 = { low: priceAt(predictedGapPct - 1.96 * model.residualStd), high: priceAt(predictedGapPct + 1.96 * model.residualStd) };
@@ -459,8 +463,8 @@ function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model) {
         errorPct,
         absErrorPct: round(Math.abs(errorPct), 2),
         directionHit: Math.sign(predictedGapPct) === Math.sign(actualGapPct),
-        withinCi68: pair.actualOpen >= ci68.low && pair.actualOpen <= ci68.high,
-        withinCi95: pair.actualOpen >= ci95.low && pair.actualOpen <= ci95.high,
+        withinCi68: pair.actualClose >= ci68.low && pair.actualClose <= ci68.high,
+        withinCi95: pair.actualClose >= ci95.low && pair.actualClose <= ci95.high,
         resolvedAt: now,
       },
     };
@@ -487,7 +491,10 @@ async function updatePredictionAccuracyHistory(twDaily, newEntry) {
     if (entry.actual != null) continue;
     const day = twByDate.get(entry.date);
     if (!day) continue; // 該日還沒收盤(或不在目前抓到的範圍內)，之後執行再回填
-    const actualGapPct = round((day.open / entry.basisPrevClose - 1) * 100, 2);
+    // 用當日收盤價驗證(不是開盤價)：「盤前股價預測」跟「ADR歷史相近價位類比估計」預測的
+    // 目標都是開盤價，但這裡改用收盤價當最終驗證基準，所以誤差/命中率會包含開盤後到收盤
+    // 的盤中變動，不是純粹的開盤價預測誤差；open/close兩個原始值都照樣存起來供參考。
+    const actualGapPct = round((day.close / entry.basisPrevClose - 1) * 100, 2);
     const errorPct = round(entry.predictedGapPct - actualGapPct, 2);
     const resolvedAt = new Date().toISOString();
     entry.actual = {
@@ -497,8 +504,8 @@ async function updatePredictionAccuracyHistory(twDaily, newEntry) {
       errorPct,
       absErrorPct: round(Math.abs(errorPct), 2),
       directionHit: Math.sign(entry.predictedGapPct) === Math.sign(actualGapPct),
-      withinCi68: day.open >= entry.ci68.low && day.open <= entry.ci68.high,
-      withinCi95: day.open >= entry.ci95.low && day.open <= entry.ci95.high,
+      withinCi68: day.close >= entry.ci68.low && day.close <= entry.ci68.high,
+      withinCi95: day.close >= entry.ci95.low && day.close <= entry.ci95.high,
       resolvedAt,
     };
     // 「ADR歷史相近價位類比估計」是另一種獨立估計法(不是OLS模型)，同一天有記錄到的話
@@ -573,12 +580,19 @@ function computePredictionAccuracySummary(history) {
 
   if (Object.values(windows).every((w) => w == null)) return null;
 
+  // 走勢圖改用實際價位(元)而不是缺口%——「盤前股價預測」「ADR歷史相近價位類比估計」都已經
+  // 有現成的價格欄位(predictedOpen/analogEstimate.avgTwOpen)，「收盤價」也已經存在
+  // actual.close，直接三條線都用價位表示，比缺口%更直觀。缺口%欄位還是保留(gapPct結尾)，
+  // 供tooltip需要時參考用，不強制只能二選一。
   const recentSeries = resolved.slice(-ACCURACY_RECENT_SERIES_LIMIT).map((h) => ({
     date: h.date,
+    predictedPrice: h.predictedOpen,
     predictedGapPct: h.predictedGapPct,
+    analogPrice: h.analogEstimate ? h.analogEstimate.avgTwOpen : null,
+    analogGapPct: h.analogEstimate && h.analogEstimate.actual ? h.analogEstimate.actual.analogGapPct : null,
+    actualPrice: h.actual.close,
     actualGapPct: h.actual.actualGapPct,
     directionHit: h.actual.directionHit,
-    analogGapPct: h.analogEstimate && h.analogEstimate.actual ? h.analogEstimate.actual.analogGapPct : null,
     seeded: h.seeded === true,
   }));
 
