@@ -25,9 +25,16 @@ const DATA_PATH = join(__dirname, "..", "data", "data.json");
 const CONFIG_PATH = join(__dirname, "..", "data", "config.json");
 const PREMIUM_HISTORY_PATH = join(__dirname, "..", "data", "adr-premium-history.json");
 const YF_UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
-const REGRESSION_WINDOW = "6mo";
-const REGRESSION_WINDOW_MONTHS = 6;
+// ADR/匯率序列固定抓1年：「套牢價(ADR近6個月最高)」「ADR歷史相近價位類比估計」這兩個
+// 既有功能仍然只看近6個月(用filterSeriesToRecentMonths從這份1年資料裡篩出6個月子集，
+// 維持原本的文案與行為不變)，只有「開盤價機率預估」的雙變數迴歸(ADR漲跌%+溢價偏離%)
+// 改用完整1年資料訓練，樣本數更多、統計檢定力更足。
+const REGRESSION_WINDOW = "1y";
+const REGRESSION_WINDOW_MONTHS = 12;
 const MIN_REGRESSION_SAMPLES = 20;
+const MIN_REGRESSION_SAMPLES_V2 = 60;
+// 溢價率「相對自身近期水準」的移動平均天數，用來算「溢價偏離」這個預測變數。
+const PREMIUM_ROLL_WINDOW_DAYS = 60;
 
 function parseArgs(argv) {
   const out = {};
@@ -97,6 +104,61 @@ async function autoFetchAdrAndFx(adrDaily, fxDaily) {
   };
 }
 
+function rocToIso(rocDate) {
+  // "115/07/21" -> "2026-07-21"
+  const [y, m, d] = rocDate.split("/");
+  const year = Number(y) + 1911;
+  return `${year}-${m}-${d}`;
+}
+
+async function fetchTwseJson(url) {
+  const res = await fetch(url, { headers: { "User-Agent": YF_UA } });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return res.json();
+}
+
+// 抓近N個月的TWSE STOCK_DAY(月度報表)，只取「開盤價機率預估」雙變數迴歸需要的
+// date/open/close，不算技術指標——跟update-dashboard.mjs的fetchDaily()是同一套TWSE
+// API、同一種逐月請求方式，但那邊固定近6個月是給K線圖/估值分區這些「顯示用」欄位，
+// 語意不能隨便改；這裡另外獨立抓一份較長區間，只給統計模型訓練用，兩邊互不影響。
+async function fetchTwseDailyRange(months) {
+  const daily = [];
+  const today = new Date();
+  for (let i = months - 1; i >= 0; i--) {
+    const d = new Date(today.getFullYear(), today.getMonth() - i, 1);
+    const dateParam = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}01`;
+    const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${dateParam}&stockNo=2330`;
+    try {
+      const resp = await fetchTwseJson(url);
+      if (resp.stat === "OK" && resp.data) {
+        for (const row of resp.data) {
+          daily.push({ date: rocToIso(row[0]), open: Number(String(row[3]).replace(/,/g, "")), close: Number(String(row[6]).replace(/,/g, "")) });
+        }
+      }
+    } catch (e) {
+      console.warn(`  STOCK_DAY(${months}個月範圍) ${dateParam} 抓取失敗: ${e.message}`);
+    }
+    await new Promise((r) => setTimeout(r, 600));
+  }
+  const seen = new Set();
+  return daily
+    .filter((d) => Number.isFinite(d.open) && Number.isFinite(d.close))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    .filter((d) => (seen.has(d.date) ? false : (seen.add(d.date), true)));
+}
+
+// 從一份日期已排序的{date, close, ...}序列裡，篩出「以序列最後一天為基準」往前推N個月
+// 的子集——用來在已經抓了1年的ADR/匯率資料時，還原出原本「近6個月」語意的子集合，
+// 讓套牢價、ADR歷史相近價位類比估計這兩個既有功能的行為/文案完全不受影響。
+function filterSeriesToRecentMonths(series, months) {
+  if (series.length === 0) return series;
+  const latest = new Date(series[series.length - 1].date + "T00:00:00Z");
+  const cutoff = new Date(latest);
+  cutoff.setUTCMonth(cutoff.getUTCMonth() - months);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  return series.filter((s) => s.date >= cutoffStr);
+}
+
 // ---- 統計小工具 ----
 function mean(a) { return a.reduce((x, y) => x + y, 0) / a.length; }
 function stddev(a) { const m = mean(a); return Math.sqrt(mean(a.map((x) => (x - m) ** 2))); }
@@ -113,6 +175,44 @@ function olsRegression(xs, ys) {
   const alpha = my - beta * mx;
   const r = sxy / Math.sqrt(sxx * syy);
   return { beta, alpha, r, r2: r * r, n };
+}
+
+// 二元線性迴歸 y = b0 + b1*x1 + b2*x2（最小平方法，附標準誤/t值/p值/調整後R²），
+// 用於「開盤缺口% ~ ADR漲跌% + 溢價偏離%」雙變數模型。用中心化(離均差)平方和/交叉乘積
+// 的封閉解算係數，標準誤用(X'X)⁻¹σ²的解析解(2變數情形有簡潔公式，不需要矩陣運算)。
+// p值用常態分布近似t分布計算——樣本數在這個模型的最低門檻(MIN_REGRESSION_SAMPLES_V2=60)
+// 以上時，自由度動輒50起跳，t分布已經非常接近常態，這個近似不會有實質誤差。
+function olsRegression2(xs1, xs2, ys) {
+  const n = xs1.length;
+  const mx1 = mean(xs1), mx2 = mean(xs2), my = mean(ys);
+  let Sx1x1 = 0, Sx2x2 = 0, Sx1x2 = 0, Sx1y = 0, Sx2y = 0, Syy = 0;
+  for (let i = 0; i < n; i++) {
+    const d1 = xs1[i] - mx1, d2 = xs2[i] - mx2, dy = ys[i] - my;
+    Sx1x1 += d1 * d1; Sx2x2 += d2 * d2; Sx1x2 += d1 * d2;
+    Sx1y += d1 * dy; Sx2y += d2 * dy; Syy += dy * dy;
+  }
+  const det = Sx1x1 * Sx2x2 - Sx1x2 * Sx1x2;
+  const b1 = (Sx1y * Sx2x2 - Sx2y * Sx1x2) / det;
+  const b2 = (Sx2y * Sx1x1 - Sx1y * Sx1x2) / det;
+  const b0 = my - b1 * mx1 - b2 * mx2;
+
+  let ssRes = 0;
+  for (let i = 0; i < n; i++) {
+    const pred = b0 + b1 * xs1[i] + b2 * xs2[i];
+    ssRes += (ys[i] - pred) ** 2;
+  }
+  const r2 = 1 - ssRes / Syy;
+  const k = 3; // 截距 + 2個變數
+  const dof = n - k;
+  const sigma2 = ssRes / dof;
+  const seB1 = Math.sqrt((sigma2 * Sx2x2) / det);
+  const seB2 = Math.sqrt((sigma2 * Sx1x1) / det);
+  const tB1 = b1 / seB1, tB2 = b2 / seB2;
+  const pB1 = 2 * (1 - normalCdf(Math.abs(tB1)));
+  const pB2 = 2 * (1 - normalCdf(Math.abs(tB2)));
+  const adjR2 = 1 - (1 - r2) * (n - 1) / dof;
+
+  return { b0, b1, b2, r2, adjR2, n, dof, seB1, seB2, tB1, tB2, pB1, pB2 };
 }
 
 // 標準常態分布 CDF（Abramowitz & Stegun 7.1.26 近似），用來把「預估缺口% / 殘差標準差」
@@ -137,16 +237,31 @@ function nearestOnOrBefore(map, sortedDates, date) {
 }
 
 // ADR溢價率歷史序列，永久保留、逐日累積（不像data.json.daily只保留近6個月滾動視窗，
-// 這份會一直長下去），供未來回測「溢價率相對自身歷史均值的偏離，對台股開盤缺口是否有
-// 額外預測力」使用。每次執行都用當次抓到的近6個月ADR/匯率序列，對這6個月內每一個台股
-// 交易日重新算一次溢價率、寫回(upsert)到歷史檔——同一天重算的結果理論上會一致(除非
-// Yahoo回補/修正了歷史收盤價)，範圍外、已經寫進歷史檔的舊資料則完全不動，不會被覆蓋
-// 或砍掉。這樣PR合併後第一次在GitHub Actions真正跑起來時，就能一口氣回填近6個月的
-// 資料，不用從零開始每天累積一筆才能拿到足夠回測的樣本數。
+// 這份會一直長下去），供回測「溢價率相對自身歷史均值的偏離，對台股開盤缺口是否有額外
+// 預測力」使用，也是「開盤價機率預估」雙變數模型的訓練資料來源之一。
+//
+// 時區對應：ADR(美股)的收盤時間換算成台北時間，落在台股「隔天凌晨」——例如美東夏令
+// 9:30am-4:00pm(ET)收盤，台北時間是UTC+8、ET(EDT)是UTC-4，換算過去是台北時間晚上
+// 9:30到隔天凌晨4:00收盤。所以「美股日期字串D」這根K棒，實際上是在台股「D的隔天」
+// 開盤前就已經收盤、屬於已知資訊，正確的配對方式是「ADR日期D → 之後第一個台股交易日
+// T」，跟下面buildOpenGapModel()的配對邏輯完全一致(這支function本來就是同一套時區
+// 對應規則，這裡沿用而不是另外發明一套)。
+//
+// 之前的版本誤用「nearestOnOrBefore(adrMap, adrDates, 台股日期)」，也就是找「日期字串
+// 小於等於台股日期」的ADR資料——這個方向反了：只要Yahoo後來把「美股日期字串剛好等於
+// 台股日期」那根K棒也补進資料(這在回填較舊歷史時幾乎必然發生，因為那根K棒早就收盤、
+// 資料已經齊全)，就會被誤判成「日期<=台股日期」而優先命中，實際上配到了時間上晚於台股
+// T當天開盤、causally不可能已知的ADR收盤價，變成用未來資訊回推過去，因果順序顛倒。
+// 現在改成跟buildOpenGapModel()一樣，用「ADR日期D找之後第一個台股交易日T」的方向，
+// 兩邊時區對應邏輯保持一致，也修正了這個回測資料本身的正確性問題。
+//
+// 假日不對應空值：美股/台股假日行事曆不同步，兩邊都直接用「這個市場有開盤的那些
+// 日期」比對(找不到就continue跳過，不會塞null或用0代替)，長假(例如台股連假)會自然
+// 對應到假期結束後的下一個台股交易日，不會产生錯誤的1:1單日配對。
 async function updateAdrPremiumHistory(twDaily, adrDaily, fxDaily, adrRatio) {
   if (!adrDaily || !fxDaily) {
     console.warn("ADR/匯率歷史序列缺失，略過ADR溢價率歷史紀錄更新");
-    return;
+    return [];
   }
   let history = [];
   try {
@@ -162,23 +277,32 @@ async function updateAdrPremiumHistory(twDaily, adrDaily, fxDaily, adrRatio) {
   const fxDates = [...fxMap.keys()].sort();
 
   let touched = 0;
-  for (const day of twDaily) {
-    const adrClose = nearestOnOrBefore(adrMap, adrDates, day.date);
-    const fx = nearestOnOrBefore(fxMap, fxDates, day.date);
-    if (adrClose == null || fx == null) continue;
+  for (const D of adrDates) {
+    const adrClose = adrMap.get(D);
+    const fx = nearestOnOrBefore(fxMap, fxDates, D);
+    if (fx == null) continue;
+
+    let tIdx = -1;
+    for (let j = 0; j < twDaily.length; j++) {
+      if (twDaily[j].date > D) { tIdx = j; break; }
+    }
+    if (tIdx < 0) continue;
+    const day = twDaily[tIdx];
+
     const impliedTwd = round((adrClose / adrRatio) * fx, 2);
     const premiumPct = round(((impliedTwd - day.close) / day.close) * 100, 2);
-    byDate.set(day.date, { date: day.date, twClose: day.close, adrClose, usdTwd: fx, adrRatio, impliedTwd, premiumPct });
+    byDate.set(day.date, { date: day.date, twClose: day.close, adrClose, usdTwd: fx, adrRatio, impliedTwd, premiumPct, adrDate: D });
     touched++;
   }
 
   const merged = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   await writeFile(PREMIUM_HISTORY_PATH, JSON.stringify(merged), "utf8");
   console.log(`已更新ADR溢價率歷史紀錄: ${PREMIUM_HISTORY_PATH}（累計 ${merged.length} 筆，本次範圍內更新 ${touched} 筆）`);
+  return merged;
 }
 
-// 用近6個月 ADR(TSM)/USD-TWD/台股日K，訓練「ADR單日漲跌% → 台股隔日開盤缺口%」OLS迴歸。
-// adrSeries/fxSeries: [{date, close}]（date為美東交易日期字串）；twDaily: data.json 的 daily 陣列。
+// 用近1年 ADR(TSM)/USD-TWD/台股日K，訓練「ADR單日漲跌% → 台股隔日開盤缺口%」OLS迴歸。
+// adrSeries/fxSeries: [{date, close}]（date為美東交易日期字串）；twDaily: 近1年台股日K。
 function buildOpenGapModel(adrSeries, fxSeries, twDaily) {
   const adrMap = new Map(adrSeries.map((s) => [s.date, s.close]));
   const adrDates = adrSeries.map((s) => s.date);
@@ -215,6 +339,67 @@ function buildOpenGapModel(adrSeries, fxSeries, twDaily) {
   const xs = uniq.map((p) => p.adrChangePct), ys = uniq.map((p) => p.twOpenGapPct);
   const reg = olsRegression(xs, ys);
   const residuals = uniq.map((p) => p.twOpenGapPct - (reg.beta * p.adrChangePct + reg.alpha));
+  const residualStd = stddev(residuals);
+  const hitRate = uniq.filter((p) => Math.sign(p.adrChangePct) === Math.sign(p.twOpenGapPct) && p.adrChangePct !== 0).length / uniq.length;
+
+  return { ...reg, residualStd, hitRate };
+}
+
+// 雙變數版本：「ADR單日漲跌% + ADR溢價率偏離近期均值」→ 台股隔日開盤缺口%。
+// 配對邏輯(ADR日期D找之後第一個台股交易日T)跟buildOpenGapModel()完全一致，只是多帶一個
+// 「溢價偏離」特徵：用T的前一個台股交易日Tprev在premiumHistory裡的溢價率，相對Tprev
+// 當時往前rollWindowDays天的移動平均，算出偏離值。刻意用Tprev(T的前一天)而不是T自己的
+// 溢價率，是因為T自己的溢價率要等T收盤才算得出來，T開盤當下根本還不存在這個數字，用
+// 它來"預測"T的開盤缺口會有look-ahead bias(拿還沒發生的資訊回推)；Tprev收盤時的溢價率
+// 在T開盤前就已經是確定的已知資訊，這樣配對才站得住腳。
+function buildOpenGapModelV2(adrSeries, fxSeries, twDaily, premiumHistory, rollWindowDays) {
+  const adrMap = new Map(adrSeries.map((s) => [s.date, s.close]));
+  const adrDates = adrSeries.map((s) => s.date);
+  const fxMap = new Map(fxSeries.map((s) => [s.date, s.close]));
+  const fxDates = fxSeries.map((s) => s.date).sort();
+  const adrRatio = 5;
+
+  const premiumSorted = [...premiumHistory].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const premiumIndexByDate = new Map(premiumSorted.map((h, i) => [h.date, i]));
+
+  const pairs = [];
+  for (let i = 1; i < adrDates.length; i++) {
+    const D = adrDates[i], Dprev = adrDates[i - 1];
+    const adrClose = adrMap.get(D), adrClosePrev = adrMap.get(Dprev);
+    const adrChangePct = (adrClose / adrClosePrev - 1) * 100;
+
+    const fx = nearestOnOrBefore(fxMap, fxDates, D);
+    if (fx == null) continue;
+
+    let tIdx = -1;
+    for (let j = 0; j < twDaily.length; j++) {
+      if (twDaily[j].date > D) { tIdx = j; break; }
+    }
+    if (tIdx <= 0) continue;
+    const T = twDaily[tIdx], Tprev = twDaily[tIdx - 1];
+    const twOpenGapPct = (T.open / Tprev.close - 1) * 100;
+
+    const pIdx = premiumIndexByDate.get(Tprev.date);
+    if (pIdx == null) continue;
+    const windowStart = Math.max(0, pIdx - rollWindowDays + 1);
+    const window = premiumSorted.slice(windowStart, pIdx + 1).map((h) => h.premiumPct);
+    if (window.length < Math.min(rollWindowDays, 20)) continue; // 滾動均值暖機不足，跳過
+    const rollMean = mean(window);
+    const premiumDev = premiumSorted[pIdx].premiumPct - rollMean;
+
+    pairs.push({ twDate: T.date, adrChangePct, premiumDev, twOpenGapPct });
+  }
+
+  const byTwDate = new Map();
+  for (const p of pairs) byTwDate.set(p.twDate, p);
+  const uniq = [...byTwDate.values()];
+  if (uniq.length < MIN_REGRESSION_SAMPLES_V2) return null;
+
+  const xs1 = uniq.map((p) => p.adrChangePct);
+  const xs2 = uniq.map((p) => p.premiumDev);
+  const ys = uniq.map((p) => p.twOpenGapPct);
+  const reg = olsRegression2(xs1, xs2, ys);
+  const residuals = uniq.map((p, i) => ys[i] - (reg.b0 + reg.b1 * p.adrChangePct + reg.b2 * p.premiumDev));
   const residualStd = stddev(residuals);
   const hitRate = uniq.filter((p) => Math.sign(p.adrChangePct) === Math.sign(p.twOpenGapPct) && p.adrChangePct !== 0).length / uniq.length;
 
@@ -319,13 +504,15 @@ async function main() {
   let sources = ["stockanalysis.com", "finance.yahoo.com"];
   let fxSource = "tw.stock.yahoo.com USDTWD=X";
 
-  // 近6個月 ADR/匯率歷史序列：無論今天的ADR/匯率是手動交叉比對還是自動抓取，都需要
-  // 這份歷史資料來訓練「ADR vs 台股開盤缺口」迴歸模型，所以固定抓取。
+  // 近1年 ADR/匯率歷史序列：無論今天的ADR/匯率是手動交叉比對還是自動抓取，都需要
+  // 這份歷史資料來訓練「ADR vs 台股開盤缺口」迴歸模型，所以固定抓取。套牢價、ADR歷史
+  // 相近價位類比估計這兩個既有功能仍然只看近6個月，稍後會從這份1年資料篩出6個月子集
+  // 給它們用，行為/文案完全不變。
   let adrDaily = null, fxDaily = null;
   try {
     [adrDaily, fxDaily] = await Promise.all([fetchYahooDaily("TSM"), fetchYahooDaily("TWD=X")]);
   } catch (e) {
-    console.warn("抓取 ADR/匯率近6個月歷史序列失敗，將略過開盤價機率預估: " + e.message);
+    console.warn("抓取 ADR/匯率近1年歷史序列失敗，將略過開盤價機率預估: " + e.message);
   }
 
   if (!adrPrice || !adrQuoteTime || !usdTwd || !fxQuoteTime) {
@@ -354,12 +541,27 @@ async function main() {
   };
   d.fxRate = { usdTwd, quoteTime: fxQuoteTime, source: fxSource };
 
-  // ADR近6個月最高收盤價(美元)，取自本次一併抓取的ADR歷史序列(供開盤價迴歸訓練用)。
-  if (adrDaily) {
-    d.adrSixMonthHighUsd = round(Math.max(...adrDaily.series.map((s) => s.close)), 2);
+  // 從近1年的ADR/匯率序列篩出近6個月子集，維持「套牢價」「ADR歷史相近價位類比估計」
+  // 這兩個既有功能原本的6個月語意不變。
+  const adrDaily6mo = adrDaily ? { ...adrDaily, series: filterSeriesToRecentMonths(adrDaily.series, 6) } : null;
+  const fxDaily6mo = fxDaily ? { ...fxDaily, series: filterSeriesToRecentMonths(fxDaily.series, 6) } : null;
+
+  // ADR近6個月最高收盤價(美元)。
+  if (adrDaily6mo) {
+    d.adrSixMonthHighUsd = round(Math.max(...adrDaily6mo.series.map((s) => s.close)), 2);
   }
 
-  await updateAdrPremiumHistory(d.daily, adrDaily, fxDaily, adrRatio);
+  // 近1年台股日K（只取date/open/close，供開盤價機率預估雙變數模型訓練用；跟data.json
+  // 的daily欄位——那份固定近6個月、給K線圖/估值分區顯示用——是完全獨立的兩份資料，
+  // 互不影響）。
+  let twDaily1y = [];
+  try {
+    twDaily1y = await fetchTwseDailyRange(REGRESSION_WINDOW_MONTHS);
+  } catch (e) {
+    console.warn("抓取近1年台股日K(供開盤價機率預估用)失敗: " + e.message);
+  }
+
+  const premiumHistory = await updateAdrPremiumHistory(twDaily1y, adrDaily, fxDaily, adrRatio);
 
   const impliedTwd = Math.round(((adrPrice / adrRatio) * usdTwd) * 100) / 100;
   const premiumPct = Math.round((((impliedTwd - d.valuation.closePrice) / d.valuation.closePrice) * 100) * 100) / 100;
@@ -446,37 +648,90 @@ async function main() {
     console.warn("config.json 讀取或計算失敗，略過官方預估區塊: " + e.message);
   }
 
-  // ---- 台股開盤價機率預估（依近6個月「ADR漲跌% → 開盤缺口%」迴歸模型） ----
+  // ---- 台股開盤價機率預估（依近1年「ADR漲跌% + ADR溢價偏離%」雙變數迴歸模型） ----
+  // 優先用雙變數模型(多帶溢價偏離這個參數)；如果溢價歷史還不夠長(剛好卡在移動平均
+  // 暖機期、樣本數不足MIN_REGRESSION_SAMPLES_V2)，退回只用ADR漲跌%的單變數模型，
+  // 不要整張卡片直接消失——這個退回路徑理論上只有在資料還在累積的最初期間才會用到，
+  // 這次1年回填後樣本數已經足夠，正常情況下應該都會走雙變數模型。
   if (adrDaily && fxDaily) {
     try {
-      const model = buildOpenGapModel(adrDaily.series, fxDaily.series, d.daily);
-      if (model) {
-        const predictedGapPct = model.beta * adrChangePct + model.alpha;
+      const model2 = twDaily1y.length > 0
+        ? buildOpenGapModelV2(adrDaily.series, fxDaily.series, twDaily1y, premiumHistory, PREMIUM_ROLL_WINDOW_DAYS)
+        : null;
+
+      if (model2) {
+        const premiumHistorySorted = [...premiumHistory].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        const latestPremium = premiumHistorySorted[premiumHistorySorted.length - 1];
+        const rollWindow = premiumHistorySorted.slice(Math.max(0, premiumHistorySorted.length - PREMIUM_ROLL_WINDOW_DAYS)).map((h) => h.premiumPct);
+        const premiumDevNow = latestPremium.premiumPct - mean(rollWindow);
+
+        const predictedGapPct = model2.b0 + model2.b1 * adrChangePct + model2.b2 * premiumDevNow;
         const base = d.valuation.closePrice;
         const priceAt = (gapPct) => round(base * (1 + gapPct / 100), 2);
-        const probUpPct = round(normalCdf(predictedGapPct / model.residualStd) * 100, 1);
+        const probUpPct = round(normalCdf(predictedGapPct / model2.residualStd) * 100, 1);
+        const confidenceIndexPct = round(Math.max(0, model2.adjR2) * 100, 1);
 
         d.openPrediction = {
           predictedGapPct: round(predictedGapPct, 2),
           predictedOpen: priceAt(predictedGapPct),
-          ci68: { low: priceAt(predictedGapPct - model.residualStd), high: priceAt(predictedGapPct + model.residualStd) },
-          ci95: { low: priceAt(predictedGapPct - 1.96 * model.residualStd), high: priceAt(predictedGapPct + 1.96 * model.residualStd) },
+          ci68: { low: priceAt(predictedGapPct - model2.residualStd), high: priceAt(predictedGapPct + model2.residualStd) },
+          ci95: { low: priceAt(predictedGapPct - 1.96 * model2.residualStd), high: priceAt(predictedGapPct + 1.96 * model2.residualStd) },
           probUpPct,
           basisAdrChangePct: adrChangePct,
+          basisPremiumDevPct: round(premiumDevNow, 2),
           basisPrevClose: base,
           model: {
-            beta: round(model.beta, 4),
-            alpha: round(model.alpha, 4),
-            r2: round(model.r2, 4),
-            residualStd: round(model.residualStd, 4),
-            hitRatePct: round(model.hitRate * 100, 1),
-            sampleSize: model.n,
+            method: "OLS雙變數迴歸（開盤缺口% ~ ADR漲跌% + 溢價偏離%）",
+            interceptB0: round(model2.b0, 4),
+            adrChangeCoefB1: round(model2.b1, 4),
+            premiumDevCoefB2: round(model2.b2, 4),
+            r2: round(model2.r2, 4),
+            adjR2: round(model2.adjR2, 4),
+            tAdrChange: round(model2.tB1, 2),
+            tPremiumDev: round(model2.tB2, 2),
+            pAdrChange: round(model2.pB1, 4),
+            pPremiumDev: round(model2.pB2, 4),
+            residualStd: round(model2.residualStd, 4),
+            hitRatePct: round(model2.hitRate * 100, 1),
+            sampleSize: model2.n,
             windowMonths: REGRESSION_WINDOW_MONTHS,
+            premiumRollWindowDays: PREMIUM_ROLL_WINDOW_DAYS,
+            confidenceIndexPct,
           },
         };
-        console.log(`開盤價機率預估: 缺口${d.openPrediction.predictedGapPct}%  預估開盤價${d.openPrediction.predictedOpen}  上漲機率${probUpPct}%（R²=${model.r2.toFixed(2)}, n=${model.n}）`);
+        console.log(`開盤價機率預估(雙變數): 缺口${d.openPrediction.predictedGapPct}%  預估開盤價${d.openPrediction.predictedOpen}  上漲機率${probUpPct}%（調整後R²=${model2.adjR2.toFixed(3)}, n=${model2.n}, 溢價偏離t值=${model2.tB2.toFixed(2)}）`);
       } else {
-        console.warn(`可用配對樣本數不足(<${MIN_REGRESSION_SAMPLES})，略過開盤價機率預估`);
+        // 雙變數模型樣本數不足，退回單變數模型(僅ADR漲跌%)。
+        const model = buildOpenGapModel(adrDaily.series, fxDaily.series, twDaily1y.length > 0 ? twDaily1y : d.daily);
+        if (model) {
+          const predictedGapPct = model.beta * adrChangePct + model.alpha;
+          const base = d.valuation.closePrice;
+          const priceAt = (gapPct) => round(base * (1 + gapPct / 100), 2);
+          const probUpPct = round(normalCdf(predictedGapPct / model.residualStd) * 100, 1);
+
+          d.openPrediction = {
+            predictedGapPct: round(predictedGapPct, 2),
+            predictedOpen: priceAt(predictedGapPct),
+            ci68: { low: priceAt(predictedGapPct - model.residualStd), high: priceAt(predictedGapPct + model.residualStd) },
+            ci95: { low: priceAt(predictedGapPct - 1.96 * model.residualStd), high: priceAt(predictedGapPct + 1.96 * model.residualStd) },
+            probUpPct,
+            basisAdrChangePct: adrChangePct,
+            basisPrevClose: base,
+            model: {
+              method: "OLS單變數迴歸（開盤缺口% ~ ADR漲跌%，溢價率樣本數不足時的退回版本）",
+              beta: round(model.beta, 4),
+              alpha: round(model.alpha, 4),
+              r2: round(model.r2, 4),
+              residualStd: round(model.residualStd, 4),
+              hitRatePct: round(model.hitRate * 100, 1),
+              sampleSize: model.n,
+              windowMonths: REGRESSION_WINDOW_MONTHS,
+            },
+          };
+          console.log(`開盤價機率預估(單變數退回): 缺口${d.openPrediction.predictedGapPct}%  預估開盤價${d.openPrediction.predictedOpen}  上漲機率${probUpPct}%（R²=${model.r2.toFixed(2)}, n=${model.n}）`);
+        } else {
+          console.warn(`雙變數與單變數模型可用樣本數都不足，略過開盤價機率預估`);
+        }
       }
     } catch (e) {
       console.warn("開盤價機率預估計算失敗，略過: " + e.message);
@@ -484,9 +739,9 @@ async function main() {
   }
 
   // ---- ADR歷史相近價位類比估計 ----
-  if (adrDaily && fxDaily) {
+  if (adrDaily6mo && fxDaily6mo) {
     try {
-      const analog = findAnalogMatches(adrPrice, adrDaily.series, fxDaily.series, d.daily);
+      const analog = findAnalogMatches(adrPrice, adrDaily6mo.series, fxDaily6mo.series, d.daily);
       if (analog) {
         d.adrAnalogMatches = analog;
         console.log(`歷史相近ADR價位比對: ${analog.count}筆 (±${analog.tolerancePct}%)  平均對應台股開盤價: ${analog.avgTwOpen}`);
