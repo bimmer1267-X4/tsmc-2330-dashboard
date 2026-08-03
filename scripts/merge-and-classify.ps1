@@ -25,7 +25,8 @@ param(
     [string]$AdrQuoteTime,
     [double]$UsdTwd,
     [string]$FxQuoteTime,
-    [double]$AdrRatio = 5
+    [double]$AdrRatio = 5,
+    [switch]$BackfillOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -887,6 +888,34 @@ function Get-OpenGapModelV3($adrSeries, $fxSeries, $twDaily, $PremiumHistory, [i
         beta = $reg.beta; se = $reg.se; t = $reg.t; p = $reg.p; r2 = $reg.r2; adjR2 = $reg.adjR2; n = $reg.n
         residualStd = $residualStd; hitRate = $hitRate; pairs = $pairsSorted
     }
+}
+
+# 收盤後回填模式(-BackfillOnly)：台股收盤後(13:35)立刻用當天剛收盤的台股日K，回填
+# 「盤前股價預測準確度歷史追蹤」卡片裡今天早上那筆還沒解析的預測(actual補上開盤/收盤/
+# 誤差/走勢命中/CI覆蓋率/Brier分數)，讓卡片不用等到隔天06:00的完整排程才更新。刻意不
+# 傳NewEntry(維持$null)——「明天」的新預測需要ADR/匯率隔夜資料，13:35美股根本還沒開盤，
+# 這部分本來就做不到，維持給隔天06:00那個完整排程處理。同理不重新計算ADR換算價/估值
+# 分區/技術旗標/官方預估這些欄位，只更新predictionAccuracySummary這一個欄位，其餘完全
+# 維持這次讀到的原樣，不會被覆蓋。
+if ($BackfillOnly) {
+    $backfillPath = Join-Path $PSScriptRoot "..\data\data.json"
+    $bfD = Get-Content $backfillPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $bfTwDaily1y = @()
+    try {
+        $bfTwDaily1y = Get-TwseDailyRange $RegressionWindowMonths
+    } catch {
+        Write-Warning "抓取近1年台股日K失敗，略過收盤後回填: $($_.Exception.Message)"
+    }
+    if ($bfTwDaily1y.Count -gt 0) {
+        $bfHistory = Update-PredictionAccuracyHistory $bfTwDaily1y $null
+        $bfSummary = Get-PredictionAccuracySummary $bfHistory
+        if ($bfSummary) { $bfD | Add-Member -NotePropertyName predictionAccuracySummary -NotePropertyValue $bfSummary -Force }
+        $bfD | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $backfillPath -Encoding utf8
+        Write-Host "已完成收盤後回填(-BackfillOnly模式)，僅更新predictionAccuracySummary，其餘欄位不變。"
+    } else {
+        Write-Warning "近1年台股日K為空，略過收盤後回填"
+    }
+    exit 0
 }
 
 $sources = @("stockanalysis.com", "finance.yahoo.com")

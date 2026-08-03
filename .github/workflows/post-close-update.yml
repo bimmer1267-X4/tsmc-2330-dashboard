@@ -1,0 +1,51 @@
+name: Post-Close Update
+
+on:
+  schedule:
+    # 交易日台北時間 13:35 (05:35 UTC)，台股收盤(13:30)後立刻執行一次：更新即時報價、
+    # 並用當天剛收盤的台股日K回填「盤前股價預測準確度歷史追蹤」卡片，不用等到隔天06:00
+    # 的完整排程(update-dashboard.yml)才更新。原本每5分鐘一次的盤中排程改成這一次，
+    # 因為GitHub Actions的高頻率schedule在這個repo上實測幾乎打不中(一天該觸發約60次，
+    # 實際只成功3次左右)，改成低頻率單次觸發可靠度高很多。
+    - cron: "35 5 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-dashboard
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Fetch live quote
+        run: node scripts/fetch-live-quote.mjs
+
+      - name: Backfill prediction accuracy tracking with today's close
+        run: node scripts/merge-and-classify.mjs --backfill-only
+
+      - name: Build dashboard.html
+        run: node scripts/build.mjs
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/data.json data/prediction-accuracy-history.json dashboard.html index.html
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: post-close update (live quote + accuracy backfill)"
+            git push
+          fi
