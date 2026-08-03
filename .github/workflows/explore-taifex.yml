@@ -1,0 +1,34 @@
+name: Explore TAIFEX Yahoo Page (one-off diagnostic, no schedule)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        run: |
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: Run exploration script
+        run: node scripts/explore-taifex-yahoo.mjs
+
+      - name: Upload exploration output
+        uses: actions/upload-artifact@v4
+        with:
+          name: taifex-explore-output
+          path: explore-output/
+          retention-days: 7
