@@ -363,7 +363,7 @@ function Update-AdrPremiumHistory($TwDaily, $AdrDaily, $FxDaily, [double]$Ratio)
 function New-PredictionHistoryEntry($OpenPrediction, [int]$ModelTier, [string]$PredictedDateStr, [string]$PredictedAt, [bool]$Seeded = $false, $AnalogMatches = $null) {
     $m = $OpenPrediction.model
     $analogEstimate = if ($AnalogMatches) {
-        [PSCustomObject]@{ avgTwOpen = $AnalogMatches.avgTwOpen; tolerancePct = $AnalogMatches.tolerancePct; count = $AnalogMatches.count; actual = $null }
+        [PSCustomObject]@{ avgTwOpen = $AnalogMatches.avgTwOpen; avgTwOpenAdjusted = $AnalogMatches.avgTwOpenAdjusted; tolerancePct = $AnalogMatches.tolerancePct; count = $AnalogMatches.count; actual = $null }
     } else { $null }
     return [PSCustomObject]@{
         date = $PredictedDateStr
@@ -436,10 +436,20 @@ function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Mod
             $twTrunc = @($TwDaily | Where-Object { $_.date -lt $pair.twDate })
             $analog = Get-AnalogMatches $pair.adrClose $adrTrunc $fxTrunc $twTrunc
             if ($analog) {
-                $analogGapPct = [math]::Round(($analog.avgTwOpen / $pair.prevClose - 1) * 100, 2)
+                # 種子樣本當時的「目標匯率」＝那個歷史日期D當下已知的最新匯率(跟卡片即時運算
+                # 用「今天」的匯率是同一個概念，只是這裡的「今天」是歷史上的那一天)。fxTrunc
+                # 已經篩到date<=pair.adrDate，用Find-NearestOnOrBefore取D當時最近一筆匯率報價。
+                $fxDatesTrunc = @($fxTrunc | ForEach-Object { $_.date } | Sort-Object)
+                $fxMapTrunc = @{}
+                foreach ($s in $fxTrunc) { $fxMapTrunc[$s.date] = $s.close }
+                $seedTodayFx = Find-NearestOnOrBefore $fxMapTrunc $fxDatesTrunc $pair.adrDate
+                $avgTwOpenAdjusted = Get-AdjustedAvgTwOpen $analog.matches $seedTodayFx
+                $analogPrice = if ($null -ne $avgTwOpenAdjusted) { $avgTwOpenAdjusted } else { $analog.avgTwOpen }
+                $analogGapPct = [math]::Round(($analogPrice / $pair.prevClose - 1) * 100, 2)
                 $analogErrorPct = [math]::Round($analogGapPct - $actualGapPct, 2)
                 $analogEstimate = [PSCustomObject]@{
                     avgTwOpen = $analog.avgTwOpen
+                    avgTwOpenAdjusted = $avgTwOpenAdjusted
                     tolerancePct = $analog.tolerancePct
                     count = $analog.count
                     actual = [PSCustomObject]@{
@@ -530,7 +540,8 @@ function Update-PredictionAccuracyHistory($TwDaily, $NewEntry) {
         # 取屬性(GET)是安全的會回傳$null，但對$null.屬性做SET會丟例外，所以要先判斷
         # $entry.analogEstimate存在才能寫入.actual。
         if ($entry.analogEstimate) {
-            $analogGapPct = [math]::Round(($entry.analogEstimate.avgTwOpen / $entry.basisPrevClose - 1) * 100, 2)
+            $analogPrice = if ($null -ne $entry.analogEstimate.avgTwOpenAdjusted) { $entry.analogEstimate.avgTwOpenAdjusted } else { $entry.analogEstimate.avgTwOpen }
+            $analogGapPct = [math]::Round(($analogPrice / $entry.basisPrevClose - 1) * 100, 2)
             $analogErrorPct = [math]::Round($analogGapPct - $actualGapPct, 2)
             $entry.analogEstimate.actual = [PSCustomObject]@{
                 analogGapPct = $analogGapPct
@@ -614,7 +625,7 @@ function Get-PredictionAccuracySummary($History) {
     $seriesCount = [math]::Min($AccuracyRecentSeriesLimit, $resolved.Count)
     $recentSeries = @($resolved[($resolved.Count - $seriesCount)..($resolved.Count - 1)] | ForEach-Object {
         $analogGapPct = if ($_.analogEstimate -and $_.analogEstimate.actual) { $_.analogEstimate.actual.analogGapPct } else { $null }
-        $analogPrice = if ($_.analogEstimate) { $_.analogEstimate.avgTwOpen } else { $null }
+        $analogPrice = if ($_.analogEstimate) { if ($null -ne $_.analogEstimate.avgTwOpenAdjusted) { $_.analogEstimate.avgTwOpenAdjusted } else { $_.analogEstimate.avgTwOpen } } else { $null }
         [PSCustomObject]@{
             date = $_.date
             predictedPrice = $_.predictedOpen
@@ -791,6 +802,16 @@ function Get-AnalogMatches($todayAdrPrice, $adrSeries, $fxSeries, $twDaily) {
     if ($best.Count -eq 0) { return $null }
     $avgTwOpen = [math]::Round((Get-Mean ($best | ForEach-Object { $_.twOpen })), 2)
     return [PSCustomObject]@{ tolerancePct = $usedTolerance; todayAdrPrice = [math]::Round($todayAdrPrice, 2); matches = $best; avgTwOpen = $avgTwOpen; count = $best.Count }
+}
+
+# 把類比比對到的每一筆歷史開盤價，先用「當時的匯率」換算回等值ADR美元，再用「目標匯率」換回
+# 台幣後取平均——排除掉匯率波動本身的干擾，只反映ADR股價位階的類比，跟avgTwOpen(原始歷史
+# 開盤價直接平均、不管匯率)是不同版本。卡片上顯示給使用者看的數字用的就是這個調整後版本，
+# 所以準確度追蹤/近30日走勢圖也要統一用這個版本，才會跟卡片實際看到的數字完全一致。
+function Get-AdjustedAvgTwOpen($Matches, $TargetFxUsdTwd) {
+    if (-not $Matches -or $Matches.Count -eq 0 -or $null -eq $TargetFxUsdTwd) { return $null }
+    $adjusted = @($Matches | ForEach-Object { ($_.twOpen / $_.fxRate) * $TargetFxUsdTwd })
+    return [math]::Round((Get-Mean $adjusted), 2)
 }
 
 # 三變數版本：「ADR單日漲跌% + ADR溢價率偏離近期均值 + ADR歷史相近價位類比估計缺口%」
@@ -1209,8 +1230,10 @@ if ($adrDaily6mo -and $fxDaily6mo) {
     try {
         $analog = Get-AnalogMatches $AdrPrice $adrDaily6mo.series $fxDaily6mo.series $d.daily
         if ($analog) {
+            $avgTwOpenAdjusted = Get-AdjustedAvgTwOpen $analog.matches $UsdTwd
+            $analog | Add-Member -NotePropertyName avgTwOpenAdjusted -NotePropertyValue $avgTwOpenAdjusted -Force
             $d | Add-Member -NotePropertyName adrAnalogMatches -NotePropertyValue $analog -Force
-            Write-Host "歷史相近ADR價位比對: $($analog.count)筆 (±$($analog.tolerancePct)%)  平均對應台股開盤價: $($analog.avgTwOpen)"
+            Write-Host "歷史相近ADR價位比對: $($analog.count)筆 (±$($analog.tolerancePct)%)  平均對應台股開盤價: $($analog.avgTwOpen)（匯率調整後: $($analog.avgTwOpenAdjusted)）"
         } else {
             Write-Warning "近6個月無相近ADR價位可比對，略過類比估計"
         }

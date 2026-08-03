@@ -396,7 +396,7 @@ function buildPredictionHistoryEntry(openPrediction, modelTier, predictedDateStr
     confidenceIndexPct: m.confidenceIndexPct ?? null,
     seeded,
     analogEstimate: analogMatches
-      ? { avgTwOpen: analogMatches.avgTwOpen, tolerancePct: analogMatches.tolerancePct, count: analogMatches.count, actual: null }
+      ? { avgTwOpen: analogMatches.avgTwOpen, avgTwOpenAdjusted: analogMatches.avgTwOpenAdjusted ?? null, tolerancePct: analogMatches.tolerancePct, count: analogMatches.count, actual: null }
       : null,
     actual: null,
   };
@@ -456,10 +456,19 @@ function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model, adr
       const twTrunc = twDaily.filter((t) => t.date < pair.twDate);
       const analog = findAnalogMatches(pair.adrClose, adrTrunc, fxTrunc, twTrunc);
       if (analog) {
-        const analogGapPct = round((analog.avgTwOpen / pair.prevClose - 1) * 100, 2);
+        // 種子樣本當時的「目標匯率」＝那個歷史日期D當下已知的最新匯率(跟卡片即時運算時
+        // 用「今天」的匯率是同一個概念，只是這裡的「今天」是歷史上的那一天)。fxTrunc已經
+        // 篩到date<=pair.adrDate，用nearestOnOrBefore取D當時最近一筆匯率報價。
+        const fxDatesTrunc = fxTrunc.map((s) => s.date).sort();
+        const fxMapTrunc = new Map(fxTrunc.map((s) => [s.date, s.close]));
+        const seedTodayFx = nearestOnOrBefore(fxMapTrunc, fxDatesTrunc, pair.adrDate);
+        const avgTwOpenAdjusted = adjustAvgTwOpenToFx(analog.matches, seedTodayFx);
+        const analogPrice = avgTwOpenAdjusted ?? analog.avgTwOpen;
+        const analogGapPct = round((analogPrice / pair.prevClose - 1) * 100, 2);
         const analogErrorPct = round(analogGapPct - actualGapPct, 2);
         analogEstimate = {
           avgTwOpen: analog.avgTwOpen,
+          avgTwOpenAdjusted,
           tolerancePct: analog.tolerancePct,
           count: analog.count,
           actual: {
@@ -545,7 +554,8 @@ async function updatePredictionAccuracyHistory(twDaily, newEntry) {
     // 「ADR歷史相近價位類比估計」是另一種獨立估計法(不是OLS模型)，同一天有記錄到的話
     // 也一併算出它自己的缺口%/誤差/方向命中，跟模型的準確度分開比較。
     if (entry.analogEstimate) {
-      const analogGapPct = round((entry.analogEstimate.avgTwOpen / entry.basisPrevClose - 1) * 100, 2);
+      const analogPrice = entry.analogEstimate.avgTwOpenAdjusted ?? entry.analogEstimate.avgTwOpen;
+      const analogGapPct = round((analogPrice / entry.basisPrevClose - 1) * 100, 2);
       const analogErrorPct = round(analogGapPct - actualGapPct, 2);
       entry.analogEstimate.actual = {
         analogGapPct,
@@ -622,7 +632,7 @@ function computePredictionAccuracySummary(history) {
     date: h.date,
     predictedPrice: h.predictedOpen,
     predictedGapPct: h.predictedGapPct,
-    analogPrice: h.analogEstimate ? h.analogEstimate.avgTwOpen : null,
+    analogPrice: h.analogEstimate ? (h.analogEstimate.avgTwOpenAdjusted ?? h.analogEstimate.avgTwOpen) : null,
     analogGapPct: h.analogEstimate && h.analogEstimate.actual ? h.analogEstimate.actual.analogGapPct : null,
     actualPrice: h.actual.close,
     actualGapPct: h.actual.actualGapPct,
@@ -804,6 +814,17 @@ function findAnalogMatches(todayAdrPrice, adrSeries, fxSeries, twDaily) {
   if (best.length === 0) return null;
   const avgTwOpen = round(mean(best.map((m) => m.twOpen)), 2);
   return { tolerancePct: usedTolerance, todayAdrPrice: round(todayAdrPrice, 2), matches: best, avgTwOpen, count: best.length };
+}
+
+// 把類比比對到的每一筆歷史開盤價，先用「當時的匯率」換算回等值ADR美元，再用「目標匯率」
+// (通常是查詢當下的最新匯率)換回台幣後取平均——排除掉匯率波動本身的干擾，讓平均值只反映
+// ADR股價位階的類比，不是avgTwOpen那個「原始歷史開盤價直接平均、完全不管匯率」的版本。
+// 「ADR歷史相近價位類比估計」卡片上顯示給使用者看的數字，用的就是這個調整後版本，所以
+// 準確度追蹤/近30日走勢圖也要統一用這個版本，才會跟卡片上實際看到的數字完全一致。
+function adjustAvgTwOpenToFx(matches, targetFxUsdTwd) {
+  if (!matches || matches.length === 0 || targetFxUsdTwd == null) return null;
+  const adjusted = matches.map((m) => (m.twOpen / m.fxRate) * targetFxUsdTwd);
+  return round(mean(adjusted), 2);
 }
 
 // 三變數版本：「ADR單日漲跌% + ADR溢價率偏離近期均值 + ADR歷史相近價位類比估計缺口%」
@@ -1230,8 +1251,9 @@ async function main() {
     try {
       const analog = findAnalogMatches(adrPrice, adrDaily6mo.series, fxDaily6mo.series, d.daily);
       if (analog) {
+        analog.avgTwOpenAdjusted = adjustAvgTwOpenToFx(analog.matches, d.fxRate.usdTwd);
         d.adrAnalogMatches = analog;
-        console.log(`歷史相近ADR價位比對: ${analog.count}筆 (±${analog.tolerancePct}%)  平均對應台股開盤價: ${analog.avgTwOpen}`);
+        console.log(`歷史相近ADR價位比對: ${analog.count}筆 (±${analog.tolerancePct}%)  平均對應台股開盤價: ${analog.avgTwOpen}（匯率調整後: ${analog.avgTwOpenAdjusted}）`);
       } else {
         console.warn("近6個月無相近ADR價位可比對，略過類比估計");
       }
