@@ -637,7 +637,8 @@ function computePredictionAccuracySummary(history) {
   // 供tooltip需要時參考用，不強制只能二選一。
   const recentSeries = resolved.slice(-ACCURACY_RECENT_SERIES_LIMIT).map((h) => ({
     date: h.date,
-    predictedPrice: h.predictedOpen,
+    ci68Low: h.ci68.low,
+    ci68High: h.ci68.high,
     predictedGapPct: h.predictedGapPct,
     analogPrice: h.analogEstimate ? (h.analogEstimate.avgTwOpenAdjusted ?? h.analogEstimate.avgTwOpen) : null,
     analogGapPct: h.analogEstimate && h.analogEstimate.actual ? h.analogEstimate.actual.analogGapPct : null,

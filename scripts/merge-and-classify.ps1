@@ -632,7 +632,8 @@ function Get-PredictionAccuracySummary($History) {
         $analogPrice = if ($_.analogEstimate) { if ($null -ne $_.analogEstimate.avgTwOpenAdjusted) { $_.analogEstimate.avgTwOpenAdjusted } else { $_.analogEstimate.avgTwOpen } } else { $null }
         [PSCustomObject]@{
             date = $_.date
-            predictedPrice = $_.predictedOpen
+            ci68Low = $_.ci68.low
+            ci68High = $_.ci68.high
             predictedGapPct = $_.predictedGapPct
             analogPrice = $analogPrice
             analogGapPct = $analogGapPct
