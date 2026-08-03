@@ -455,10 +455,11 @@
     const card = document.getElementById('open-prediction-card');
     if (!pred) { card.style.display = 'none'; return; }
 
-    document.getElementById('prediction-price').textContent = fmt(pred.predictedOpen,0);
-    const dEl = document.getElementById('prediction-delta');
-    dEl.textContent = (pred.predictedGapPct>=0?'+':'') + fmt(pred.predictedGapPct,2) + '%（缺口）';
-    dEl.className = 'delta ' + (pred.predictedGapPct>=0?'up':'down');
+    // 大數字改顯示CI68區間(而非單一預測價位)，缺口%那行整個移除——單一價位/單一%數字
+    // 拿來評判太武斷，改用區間呈現讓使用者一眼看到「有把握落在這個範圍」。predictedOpen/
+    // predictedGapPct兩個原始欄位本身不受影響，「準確度追蹤」卡片跟走勢圖還是照樣使用。
+    document.getElementById('prediction-price').textContent = fmt(pred.ci68.low,0) + ' ~ ' + fmt(pred.ci68.high,0) + ' 元';
+    document.getElementById('prediction-delta').style.display = 'none';
 
     const probBadge = document.getElementById('prediction-prob-badge');
     const up = pred.probUpPct;
@@ -477,7 +478,6 @@
     const isV3 = m.analogGapCoefB3 !== undefined;
 
     const predMetrics = [
-      ['68%信賴區間', fmt(pred.ci68.low,0)+' ~ '+fmt(pred.ci68.high,0)+' 元'],
       ['95%信賴區間', fmt(pred.ci95.low,0)+' ~ '+fmt(pred.ci95.high,0)+' 元'],
       ['依據ADR隔夜漲跌', (pred.basisAdrChangePct>=0?'+':'')+fmt(pred.basisAdrChangePct,2)+'%'],
     ];
