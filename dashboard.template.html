@@ -532,9 +532,12 @@
     if (!analog || !analog.matches || !analog.matches.length) { if (card) card.style.display = 'none'; return; }
 
     // 用「當前匯率對應價格」(每筆歷史台股開盤價以今日匯率重新換算)取平均，而非原始歷史開盤價，
-    // 讓平均值排除匯率波動的干擾，只反映價位本身的類比。
+    // 讓平均值排除匯率波動的干擾，只反映價位本身的類比。這個平均值後端(merge-and-classify)
+    // 已經算好存進analog.avgTwOpenAdjusted(準確度追蹤/近30日走勢圖也是用同一份數字)，這裡
+    // 直接讀取即可，不用前端自己重算一次，避免兩邊各自算出來的公式將來不小心兜不起來；
+    // adjustedPrices這個陣列仍保留供下面逐筆表格顯示「換算後價格」欄位使用。
     const adjustedPrices = analog.matches.map((m) => (m.twOpen / m.fxRate) * fx.usdTwd);
-    const avgAdjusted = adjustedPrices.reduce((a,b) => a+b, 0) / adjustedPrices.length;
+    const avgAdjusted = analog.avgTwOpenAdjusted ?? (adjustedPrices.reduce((a,b) => a+b, 0) / adjustedPrices.length);
 
     document.getElementById('analog-avg-price').textContent = fmt(avgAdjusted,0) + ' 元';
     // 台灣不實施日光節約時間，固定加8小時换算即為台灣日期，避免Intl依locale零填補月/日。
