@@ -42,7 +42,7 @@ $PredictionHistoryPath = Join-Path $PSScriptRoot "..\data\prediction-accuracy-hi
 # 開盤價預測準確度追蹤：統計區間樣本數低於這個門檻就不顯示；前端折線圖只取最近這麼多筆
 # 已解析的紀錄(有界)；資料庫是空檔案時，用最近這麼多個歷史訓練配對回溯種一批初始樣本。
 $MinAccuracySamples = 10
-$AccuracyRecentSeriesLimit = 120
+$AccuracyRecentSeriesLimit = 240
 $AccuracySeedCount = 15
 
 # 抓取 Yahoo Finance 每日收盤序列。除了回傳最新報價(price/changePct/quoteTime)，也回傳
