@@ -924,8 +924,38 @@ function classifyZone(pe, rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60
   return { zone, reasons };
 }
 
+// 收盤後回填模式（--backfill-only）：台股收盤後(13:35)立刻用當天剛收盤的台股日K，回填
+// 「盤前股價預測準確度歷史追蹤」卡片裡今天早上那筆還沒解析的預測(actual補上開盤/收盤/
+// 誤差/走勢命中/CI覆蓋率/Brier分數)，讓卡片不用等到隔天06:00的完整排程才更新。刻意不
+// 呼叫updatePredictionAccuracyHistory的newEntry參數(傳null)——「明天」的新預測需要ADR/
+// 匯率隔夜資料，13:35美股根本還沒開盤，這部分本來就做不到，維持給隔天06:00那個完整排程
+// 處理。同理不重新計算ADR換算價/估值分區/技術旗標/官方預估這些欄位，只更新
+// predictionAccuracySummary這一個欄位，其餘完全維持這次讀到的原樣，不會被覆蓋。
+async function runBackfillOnly() {
+  const d = JSON.parse(await readFile(DATA_PATH, "utf8"));
+  let twDaily1y = [];
+  try {
+    twDaily1y = await fetchTwseDailyRange(REGRESSION_WINDOW_MONTHS);
+  } catch (e) {
+    console.warn("抓取近1年台股日K失敗，略過收盤後回填: " + e.message);
+    return;
+  }
+  if (twDaily1y.length === 0) {
+    console.warn("近1年台股日K為空，略過收盤後回填");
+    return;
+  }
+  const predictionHistory = await updatePredictionAccuracyHistory(twDaily1y, null);
+  const summary = computePredictionAccuracySummary(predictionHistory);
+  if (summary) d.predictionAccuracySummary = summary;
+  await writeFile(DATA_PATH, JSON.stringify(d), "utf8");
+  console.log("已完成收盤後回填(--backfill-only模式)，僅更新predictionAccuracySummary，其餘欄位不變。");
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if ("backfill-only" in args) {
+    return await runBackfillOnly();
+  }
   let adrPrice = Number(args["adr-price"]);
   let adrChangePct = Number(args["adr-change-pct"]);
   let adrQuoteTime = args["adr-quote-time"];
