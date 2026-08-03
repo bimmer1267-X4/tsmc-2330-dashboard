@@ -618,6 +618,13 @@ function computePredictionAccuracySummary(history) {
       meanAbsErrorPct: round(mean(slice.map((h) => h.actual.absErrorPct)), 2),
       ci68CoveragePct: round(mean(slice.map((h) => (h.actual.withinCi68 ? 100 : 0))), 1),
       ci95CoveragePct: round(mean(slice.map((h) => (h.actual.withinCi95 ? 100 : 0))), 1),
+      // Brier score：機率預測的標準評分規則，用probUpPct(上漲機率)對比「有沒有真的漲」
+      // (outcome=1/0)算均方誤差，0分最好(完美校準)、0.25分是「不管三七二十一都猜50%」
+      // 這種無資訊基準策略的分數、1分最差。跟directionHitRatePct的差別在於這個指標會
+      // 額外獎勵/懲罰信心程度——猜對且有信心 > 猜對但沒把握 > 猜錯但沒把握 > 猜錯還很有
+      // 信心，不是只看方向對不對。只套用在模型本身(有probUpPct可用)，ADR類比估計法只有
+      // 點估計、沒有機率輸出，不適用，所以analog物件不加這個欄位。
+      brierScore: round(mean(slice.map((h) => (h.probUpPct / 100 - (h.actual.actualGapPct > 0 ? 1 : 0)) ** 2)), 3),
       analog,
     };
   }

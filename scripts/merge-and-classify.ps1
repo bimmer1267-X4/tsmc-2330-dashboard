@@ -611,6 +611,10 @@ function Get-PredictionAccuracySummary($History) {
             meanAbsErrorPct = [math]::Round((Get-Mean ($slice | ForEach-Object { $_.actual.absErrorPct })), 2)
             ci68CoveragePct = [math]::Round((Get-Mean ($slice | ForEach-Object { if ($_.actual.withinCi68) { 100.0 } else { 0.0 } })), 1)
             ci95CoveragePct = [math]::Round((Get-Mean ($slice | ForEach-Object { if ($_.actual.withinCi95) { 100.0 } else { 0.0 } })), 1)
+            # Brier score：機率預測的標準評分規則，用probUpPct對比「有沒有真的漲」算均方誤差，
+            # 0分最好、0.25分是純猜測基準、1分最差。只套用在模型本身，ADR類比估計法只有點
+            # 估計沒有機率輸出，不適用。
+            brierScore = [math]::Round((Get-Mean ($slice | ForEach-Object { $outcome = if ($_.actual.actualGapPct -gt 0) { 1.0 } else { 0.0 }; [math]::Pow($_.probUpPct / 100 - $outcome, 2) })), 3)
             analog = $analog
         }
     }

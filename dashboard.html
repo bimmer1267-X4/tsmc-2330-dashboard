@@ -1093,6 +1093,7 @@
         ['平均絕對誤差', fmt(w.meanAbsErrorPct,2)+'%'],
         ['68%信賴區間覆蓋率', fmt(w.ci68CoveragePct,1)+'%'],
         ['95%信賴區間覆蓋率', fmt(w.ci95CoveragePct,1)+'%'],
+        ['Brier分數', fmt(w.brierScore,3)+'（0最佳，0.25≈純猜測基準，1最差）'],
         ['樣本數', w.sampleSize+' 筆'],
       ];
       // 「ADR歷史相近價位類比估計」是另一種獨立估計法(不是OLS模型)，跟模型放在同一張
