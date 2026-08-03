@@ -954,11 +954,13 @@
     }));
   })();
 
-  // ---- 三線走勢圖共用繪製函式：盤前股價預測 vs ADR歷史相近價位類比估計 vs 收盤價 ----
+  // ---- 走勢圖共用繪製函式：盤前預測CI68區間(河流圖) + ADR歷史相近價位類比估計 + 收盤價 ----
   // 放在這裡（而不是跟其他卡片一起靠前）是因為需要用到padL/el/axisLabel這幾個共用繪圖
   // helper，它們定義在上面主K線圖那段之後；提早放會在這些helper初始化之前就執行到，
-  // 觸發TDZ的ReferenceError。用實際價位(元)而不是缺口%，直接看三條價格線比較直觀，
-  // 缺口%/命中與否只留在tooltip裡當補充資訊。
+  // 觸發TDZ的ReferenceError。用實際價位(元)而不是缺口%，直接看價格比較直觀，缺口%/
+  // 走勢命中與否只留在tooltip裡當補充資訊。盤前預測不再畫單點虛線(單一價位太武斷)，
+  // 改成CI68上下界之間的半透明帶狀區域，讓使用者看到「有把握落在這個範圍」而不是一個
+  // 看起來精確、其實有誤差的單一數字。
   function renderPriceTrendChart({ svgId, tooltipId, legendId, series }) {
     const svg = document.getElementById(svgId);
     const legend = document.getElementById(legendId);
@@ -970,10 +972,13 @@
     const m = series.length;
     function xs(i) { return padL + (W-padL-padR) * (i / Math.max(m-1,1)); }
     const hasAnalog = series.some((s) => s.analogPrice != null);
+    const hasCi68 = series.some((s) => s.ci68Low != null && s.ci68High != null);
     let lo = Infinity, hi = -Infinity;
     series.forEach((s) => {
-      lo = Math.min(lo, s.predictedPrice, s.actualPrice); hi = Math.max(hi, s.predictedPrice, s.actualPrice);
+      lo = Math.min(lo, s.actualPrice); hi = Math.max(hi, s.actualPrice);
       if (s.analogPrice != null) { lo = Math.min(lo, s.analogPrice); hi = Math.max(hi, s.analogPrice); }
+      if (s.ci68Low != null) lo = Math.min(lo, s.ci68Low);
+      if (s.ci68High != null) hi = Math.max(hi, s.ci68High);
     });
     if (lo === hi) { lo -= 1; hi += 1; }
     const pad = (hi-lo)*0.12; lo -= pad; hi += pad;
@@ -1000,7 +1005,28 @@
       if (dashed) attrs['stroke-dasharray'] = '4,3';
       svg.appendChild(el('path', attrs));
     }
-    drawLine('predictedPrice', 'var(--muted)', true);
+    // 跟drawLine一樣的null-gap邏輯，但畫的是封閉區域(沿high線走過去、再沿low線走回來)，
+    // 不是線——連續有值的區段各自畫成一塊半透明色塊，遇到null就斷開，不會把不相鄰的
+    // 區段誤連在一起。至少要兩個點才能圍出一塊區域，單一個點的區段直接跳過。
+    function drawBand(lowKey, highKey, colorVar) {
+      let segStart = -1;
+      for (let i = 0; i <= m; i++) {
+        const valid = i < m && series[i][lowKey] != null && series[i][highKey] != null;
+        if (valid && segStart === -1) segStart = i;
+        if (!valid && segStart !== -1) {
+          const segEnd = i - 1;
+          if (segEnd > segStart) {
+            let d = '';
+            for (let j = segStart; j <= segEnd; j++) d += (j===segStart?'M':'L')+' '+xs(j)+','+y(series[j][highKey])+' ';
+            for (let j = segEnd; j >= segStart; j--) d += 'L '+xs(j)+','+y(series[j][lowKey])+' ';
+            d += 'Z';
+            svg.appendChild(el('path', {d, fill:colorVar, 'fill-opacity':0.15, stroke:'none'}));
+          }
+          segStart = -1;
+        }
+      }
+    }
+    if (hasCi68) drawBand('ci68Low', 'ci68High', 'var(--muted)');
     if (hasAnalog) drawLine('analogPrice', 'var(--ma5)', false);
     drawLine('actualPrice', 'var(--up)', false);
 
@@ -1017,10 +1043,11 @@
       axisLabel(svg, xs(i), H-4, series[i].date.slice(5), 'middle');
     }
 
-    const legendDefs = [['盤前股價預測','var(--muted)']];
+    const legendDefs = [];
+    if (hasCi68) legendDefs.push(['盤前預測區間(CI68)','var(--muted)']);
     if (hasAnalog) legendDefs.push(['ADR歷史相近價位','var(--ma5)']);
     legendDefs.push(['收盤價','var(--up)']);
-    legendDefs.push(['方向命中','var(--good)'],['方向未命中','var(--critical)']);
+    legendDefs.push(['走勢命中','var(--good)'],['走勢未命中','var(--critical)']);
     legendDefs.forEach(([label,color]) => {
       const item = document.createElement('div'); item.className='legend-item';
       const sw = document.createElement('span'); sw.className='legend-swatch'; sw.style.background=color;
@@ -1048,14 +1075,14 @@
       const dateEl = document.createElement('div'); dateEl.className='t-date';
       dateEl.textContent = s.date + (s.seeded ? '（種子回溯樣本）' : '');
       tooltip.appendChild(dateEl);
-      const rows = [
-        ['盤前股價預測', fmt(s.predictedPrice,0)+' 元', 'var(--muted)'],
-      ];
+      const rows = [];
+      if (s.ci68High != null) rows.push(['盤前預測最高股價', fmt(s.ci68High,0)+' 元', 'var(--muted)']);
+      if (s.ci68Low != null) rows.push(['盤前預測最低股價', fmt(s.ci68Low,0)+' 元', 'var(--muted)']);
       if (s.analogPrice != null) {
         rows.push(['ADR歷史相近價位', fmt(s.analogPrice,0)+' 元', 'var(--ma5)']);
       }
       rows.push(['收盤價', fmt(s.actualPrice,0)+' 元', s.directionHit ? 'var(--good)' : 'var(--critical)']);
-      rows.push(['方向', s.directionHit ? '命中' : '未命中', null]);
+      rows.push(['走勢', s.directionHit ? '命中' : '未命中', null]);
       rows.forEach(([k,v,color])=>{
         const row = document.createElement('div'); row.className='t-row';
         const kEl = document.createElement('span'); kEl.className='k';
@@ -1115,7 +1142,7 @@
       ? '⚠️ 其中 ' + seededCount + ' 筆(圖表上以空心點標示)為上線當天用歷史資料回溯試算的種子樣本，模型係數已經看過這幾天的結果，不是真正的即時盲測，之後累積的樣本才是模型的真實線上表現。'
       : '';
 
-    // ---- 盤前股價預測 vs ADR歷史相近價位 vs 收盤價 走勢圖 ----
+    // ---- 盤前預測CI68區間(河流圖) vs ADR歷史相近價位 vs 收盤價 走勢圖 ----
     // 傳完整recentSeries(不裁切，最多ACCURACY_RECENT_SERIES_LIMIT筆)。
     renderPriceTrendChart({ svgId: 'chart-prediction-accuracy', tooltipId: 'tooltip-prediction-accuracy', legendId: 'accuracy-chart-legend', series: acc.recentSeries || [] });
   })();
