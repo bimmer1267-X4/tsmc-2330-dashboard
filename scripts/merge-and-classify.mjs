@@ -46,7 +46,7 @@ const PREMIUM_ROLL_WINDOW_DAYS = 60;
 // 資料庫是空檔案時，用「最近這麼多個」歷史訓練配對回溯種一批初始樣本，讓卡片一上線就有
 // 資料可看，不用真的等一整週。
 const MIN_ACCURACY_SAMPLES = 10;
-const ACCURACY_RECENT_SERIES_LIMIT = 120;
+const ACCURACY_RECENT_SERIES_LIMIT = 240;
 const ACCURACY_SEED_COUNT = 15;
 
 function parseArgs(argv) {
