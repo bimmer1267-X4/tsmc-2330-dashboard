@@ -182,13 +182,6 @@
   </div>
 </div>
 
-<div class="card" id="price-trend-card">
-  <div style="font-weight:600; margin-bottom:2px;">近30日走勢：盤前股價預測 vs ADR歷史相近價位 vs 收盤價 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
-  <div class="sub">直接比較三種方法的價位走勢，不含統計數字；完整的命中率/誤差/信賴區間分析請見下方「開盤價預測準確度追蹤」卡片</div>
-  <div class="legend" id="price-trend-legend-30d"></div>
-  <div class="chart-wrap"><svg id="chart-price-trend-30d" width="100%" viewBox="0 0 900 160" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-price-trend-30d"></div></div>
-</div>
-
 <div class="card" id="prediction-accuracy-card">
   <div style="font-weight:600; margin-bottom:2px;">開盤價預測準確度追蹤 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
   <div class="sub">追蹤「盤前股價預測」(OLS模型)與「ADR歷史相近價位類比估計」這兩種方法過去交易日的預測結果 vs 當日實際收盤表現，評估各自的方向命中率、平均誤差(偏誤)與信賴區間覆蓋率是否符合預期；樣本數不足時對應區間會先隱藏，避免早期少量樣本產生誤導性統計。⚠️ 兩種方法本身預測的是開盤價，這裡刻意改用收盤價驗證，所以看到的誤差包含了當天開盤後到收盤的盤中變動，不是純粹的開盤價預測誤差。</div>
@@ -534,7 +527,7 @@
 
     // 用「當前匯率對應價格」(每筆歷史台股開盤價以今日匯率重新換算)取平均，而非原始歷史開盤價，
     // 讓平均值排除匯率波動的干擾，只反映價位本身的類比。這個平均值後端(merge-and-classify)
-    // 已經算好存進analog.avgTwOpenAdjusted(準確度追蹤/近30日走勢圖也是用同一份數字)，這裡
+    // 已經算好存進analog.avgTwOpenAdjusted(準確度追蹤走勢圖也是用同一份數字)，這裡
     // 直接讀取即可，不用前端自己重算一次，避免兩邊各自算出來的公式將來不小心兜不起來；
     // adjustedPrices這個陣列仍保留供下面逐筆表格顯示「換算後價格」欄位使用。
     const adjustedPrices = analog.matches.map((m) => (m.twOpen / m.fxRate) * fx.usdTwd);
@@ -965,10 +958,8 @@
   // 放在這裡（而不是跟其他卡片一起靠前）是因為需要用到padL/el/axisLabel這幾個共用繪圖
   // helper，它們定義在上面主K線圖那段之後；提早放會在這些helper初始化之前就執行到，
   // 觸發TDZ的ReferenceError。用實際價位(元)而不是缺口%，直接看三條價格線比較直觀，
-  // 缺口%/命中與否只留在tooltip裡當補充資訊。抽成函式讓「開盤價預測準確度追蹤」
-  // (完整期間)跟「近30日走勢」(簡化卡片，只裁最近30筆)兩張卡片共用同一套畫法，不用
-  // 各自維護一份幾乎一樣的程式碼。
-  function renderPriceTrendChart({ svgId, tooltipId, legendId, series, markDirectionHit = true }) {
+  // 缺口%/命中與否只留在tooltip裡當補充資訊。
+  function renderPriceTrendChart({ svgId, tooltipId, legendId, series }) {
     const svg = document.getElementById(svgId);
     const legend = document.getElementById(legendId);
     if (series.length < 2) {
@@ -1014,15 +1005,11 @@
     drawLine('actualPrice', 'var(--up)', false);
 
     // 收盤價的每個點依方向命中與否上色；種子樣本(回溯試算)用空心點跟即時預測區分。
-    // markDirectionHit=false時(例如單純看趨勢用的簡化卡片)不畫這些逐點標記，讓三條線
-    // 呈現成跟主K線圖MA5/MA20/MA60一樣乾淨的純折線，不帶「準確度」相關的視覺資訊。
-    if (markDirectionHit) {
-      series.forEach((s,i) => {
-        const cx = xs(i), cy = y(s.actualPrice);
-        const color = s.directionHit ? 'var(--good)' : 'var(--critical)';
-        svg.appendChild(el('circle', { cx, cy, r: 3, fill: s.seeded ? 'var(--surface-1)' : color, stroke: color, 'stroke-width': s.seeded ? 1.5 : 0 }));
-      });
-    }
+    series.forEach((s,i) => {
+      const cx = xs(i), cy = y(s.actualPrice);
+      const color = s.directionHit ? 'var(--good)' : 'var(--critical)';
+      svg.appendChild(el('circle', { cx, cy, r: 3, fill: s.seeded ? 'var(--surface-1)' : color, stroke: color, 'stroke-width': s.seeded ? 1.5 : 0 }));
+    });
 
     // x-axis date labels
     const step = Math.max(1, Math.round(m/6));
@@ -1033,7 +1020,7 @@
     const legendDefs = [['盤前股價預測','var(--muted)']];
     if (hasAnalog) legendDefs.push(['ADR歷史相近價位','var(--ma5)']);
     legendDefs.push(['收盤價','var(--up)']);
-    if (markDirectionHit) legendDefs.push(['方向命中','var(--good)'],['方向未命中','var(--critical)']);
+    legendDefs.push(['方向命中','var(--good)'],['方向未命中','var(--critical)']);
     legendDefs.forEach(([label,color]) => {
       const item = document.createElement('div'); item.className='legend-item';
       const sw = document.createElement('span'); sw.className='legend-swatch'; sw.style.background=color;
@@ -1067,10 +1054,8 @@
       if (s.analogPrice != null) {
         rows.push(['ADR歷史相近價位', fmt(s.analogPrice,0)+' 元', 'var(--ma5)']);
       }
-      rows.push(['收盤價', fmt(s.actualPrice,0)+' 元', markDirectionHit ? (s.directionHit ? 'var(--good)' : 'var(--critical)') : 'var(--up)']);
-      if (markDirectionHit) {
-        rows.push(['方向', s.directionHit ? '命中' : '未命中', null]);
-      }
+      rows.push(['收盤價', fmt(s.actualPrice,0)+' 元', s.directionHit ? 'var(--good)' : 'var(--critical)']);
+      rows.push(['方向', s.directionHit ? '命中' : '未命中', null]);
       rows.forEach(([k,v,color])=>{
         const row = document.createElement('div'); row.className='t-row';
         const kEl = document.createElement('span'); kEl.className='k';
@@ -1083,17 +1068,6 @@
     svg.addEventListener('pointermove', onMove);
     svg.addEventListener('pointerleave', () => { tooltip.style.display='none'; crosshair.setAttribute('visibility','hidden'); });
   }
-
-  // ---- 近30日走勢（簡化卡片，只有圖表沒有統計數字） ----
-  (function(){
-    const acc = raw.predictionAccuracySummary;
-    const card = document.getElementById('price-trend-card');
-    const series = acc && acc.recentSeries ? acc.recentSeries.slice(-30) : [];
-    // 不套用MIN_ACCURACY_SAMPLES門檻——這裡單純畫線，不是統計數字，2個點就能誠實畫出
-    // 一條線，不像命中率/誤差那樣在樣本數太少時會有「代表性不足」的疑慮。
-    if (!acc || series.length < 2) { if (card) card.style.display = 'none'; return; }
-    renderPriceTrendChart({ svgId: 'chart-price-trend-30d', tooltipId: 'tooltip-price-trend-30d', legendId: 'price-trend-legend-30d', series, markDirectionHit: false });
-  })();
 
   // ---- 開盤價預測準確度追蹤 ----
   (function(){
@@ -1141,8 +1115,7 @@
       : '';
 
     // ---- 盤前股價預測 vs ADR歷史相近價位 vs 收盤價 走勢圖 ----
-    // 畫法抽成共用函式renderPriceTrendChart(跟「近30日走勢」簡化卡片共用)，這裡傳完整
-    // recentSeries(不裁切，最多ACCURACY_RECENT_SERIES_LIMIT筆)。
+    // 傳完整recentSeries(不裁切，最多ACCURACY_RECENT_SERIES_LIMIT筆)。
     renderPriceTrendChart({ svgId: 'chart-prediction-accuracy', tooltipId: 'tooltip-prediction-accuracy', legendId: 'accuracy-chart-legend', series: acc.recentSeries || [] });
   })();
 
