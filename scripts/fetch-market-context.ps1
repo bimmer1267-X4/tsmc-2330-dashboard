@@ -244,20 +244,36 @@ function Get-TaifexNightClose($Previous) {
     }
 }
 
+# 各因子權重由重到輕：夜盤台指期(1.4) > SOX費半指數(1.2) > 選擇權Put/Call Ratio(1.0，
+# 錨點) > 外資買賣超(0.8) > 投信買賣超(0.6) > 加權指數(0.4)，以Put/Call Ratio原本的
+# 1.0為錨點、上下各用0.2等差排開。理由：台灣產業結構偏重科技半導體，且台股「一日
+# 一市」，收盤後到隔天開盤前唯一還在跳動的兩個訊號就是夜盤台指期跟SOX費半指數，比
+# 隔天才公布的三大法人買賣超更即時、也比加權指數(本身已經是落後一天的收盤資訊)更有
+# 前瞻性。
 function Get-ChipTrend($Raw) {
     $score = 0.0; $weightSum = 0.0
     $reasons = @()
     $risk = @()
 
+    if ($Raw.taifexNightClose -and $null -ne $Raw.taifexNightClose.changePct) {
+        $score += [math]::Sign($Raw.taifexNightClose.changePct) * 1.4; $weightSum += 1.4
+        $dir = if ($Raw.taifexNightClose.changePct -ge 0) { "上漲" } else { "下跌" }
+        $reasons += "台指期夜盤$dir$([math]::Abs($Raw.taifexNightClose.changePct).ToString('F2'))%"
+    }
+    if ($Raw.soxIndex -and $null -ne $Raw.soxIndex.changePct) {
+        $score += [math]::Sign($Raw.soxIndex.changePct) * 1.2; $weightSum += 1.2
+        $dir = if ($Raw.soxIndex.changePct -ge 0) { "上漲" } else { "下跌" }
+        $reasons += "SOX費半指數$dir$([math]::Abs($Raw.soxIndex.changePct).ToString('F2'))%"
+    }
     if ($Raw.institutionalNet) {
         $inet = $Raw.institutionalNet
         if ($null -ne $inet.foreignNetLots) {
-            $score += [math]::Sign($inet.foreignNetLots) * 1.5; $weightSum += 1.5
+            $score += [math]::Sign($inet.foreignNetLots) * 0.8; $weightSum += 0.8
             $dir = if ($inet.foreignNetLots -ge 0) { "買超" } else { "賣超" }
             $reasons += "外資$dir$([math]::Abs($inet.foreignNetLots).ToString('N0'))張"
         }
         if ($null -ne $inet.trustNetLots) {
-            $score += [math]::Sign($inet.trustNetLots) * 0.8; $weightSum += 0.8
+            $score += [math]::Sign($inet.trustNetLots) * 0.6; $weightSum += 0.6
             $dir = if ($inet.trustNetLots -ge 0) { "買超" } else { "賣超" }
             $reasons += "投信$dir$([math]::Abs($inet.trustNetLots).ToString('N0'))張"
         }
@@ -268,11 +284,6 @@ function Get-ChipTrend($Raw) {
         $score += $s; $weightSum += 1
         $note = if ($s -gt 0) { "（看多氣氛較濃）" } elseif ($s -lt 0) { "（避險氣氛較濃）" } else { "（中性）" }
         $reasons += "選擇權Put/Call Ratio $($ratio.ToString('F2'))$note"
-    }
-    if ($Raw.soxIndex -and $null -ne $Raw.soxIndex.changePct) {
-        $score += [math]::Sign($Raw.soxIndex.changePct) * 0.6; $weightSum += 0.6
-        $dir = if ($Raw.soxIndex.changePct -ge 0) { "上漲" } else { "下跌" }
-        $reasons += "SOX費半指數$dir$([math]::Abs($Raw.soxIndex.changePct).ToString('F2'))%"
     }
     if ($Raw.taiexIndex -and $null -ne $Raw.taiexIndex.changePct) {
         $score += [math]::Sign($Raw.taiexIndex.changePct) * 0.4; $weightSum += 0.4

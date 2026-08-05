@@ -278,19 +278,33 @@ async function fetchTaifexNightClose(previous) {
 // 每次開頁面才臨時算的展示邏輯。
 // 融資融券變化不計入方向分數（增減本身無明確多空意義，需搭配股價位置判斷），
 // 只作為風險提示文字附加在摘要下方。
+// 各因子權重由重到輕：夜盤台指期(1.4) > SOX費半指數(1.2) > 選擇權Put/Call Ratio(1.0，
+// 錨點) > 外資買賣超(0.8) > 投信買賣超(0.6) > 加權指數(0.4)，以Put/Call Ratio原本的
+// 1.0為錨點、上下各用0.2等差排開。理由：台灣產業結構偏重科技半導體，且台股「一日
+// 一市」，收盤後到隔天開盤前唯一還在跳動的兩個訊號就是夜盤台指期跟SOX費半指數，比
+// 隔天才公布的三大法人買賣超更即時、也比加權指數(本身已經是落後一天的收盤資訊)更有
+// 前瞻性。
 function classifyChipTrend(raw) {
   let score = 0, weightSum = 0;
   const reasons = [];
   const risk = [];
 
+  if (raw.taifexNightClose && raw.taifexNightClose.changePct != null) {
+    score += Math.sign(raw.taifexNightClose.changePct) * 1.4; weightSum += 1.4;
+    reasons.push(`台指期夜盤${raw.taifexNightClose.changePct >= 0 ? "上漲" : "下跌"}${Math.abs(raw.taifexNightClose.changePct).toFixed(2)}%`);
+  }
+  if (raw.soxIndex && raw.soxIndex.changePct != null) {
+    score += Math.sign(raw.soxIndex.changePct) * 1.2; weightSum += 1.2;
+    reasons.push(`SOX費半指數${raw.soxIndex.changePct >= 0 ? "上漲" : "下跌"}${Math.abs(raw.soxIndex.changePct).toFixed(2)}%`);
+  }
   if (raw.institutionalNet) {
     const inet = raw.institutionalNet;
     if (inet.foreignNetLots != null) {
-      score += Math.sign(inet.foreignNetLots) * 1.5; weightSum += 1.5;
+      score += Math.sign(inet.foreignNetLots) * 0.8; weightSum += 0.8;
       reasons.push(`外資${inet.foreignNetLots >= 0 ? "買超" : "賣超"}${Math.abs(inet.foreignNetLots).toLocaleString("zh-TW")}張`);
     }
     if (inet.trustNetLots != null) {
-      score += Math.sign(inet.trustNetLots) * 0.8; weightSum += 0.8;
+      score += Math.sign(inet.trustNetLots) * 0.6; weightSum += 0.6;
       reasons.push(`投信${inet.trustNetLots >= 0 ? "買超" : "賣超"}${Math.abs(inet.trustNetLots).toLocaleString("zh-TW")}張`);
     }
   }
@@ -299,10 +313,6 @@ function classifyChipTrend(raw) {
     const s = ratio > 1.05 ? -1 : ratio < 0.95 ? 1 : 0;
     score += s; weightSum += 1;
     reasons.push(`選擇權Put/Call Ratio ${ratio.toFixed(2)}${s > 0 ? "（看多氣氛較濃）" : s < 0 ? "（避險氣氛較濃）" : "（中性）"}`);
-  }
-  if (raw.soxIndex && raw.soxIndex.changePct != null) {
-    score += Math.sign(raw.soxIndex.changePct) * 0.6; weightSum += 0.6;
-    reasons.push(`SOX費半指數${raw.soxIndex.changePct >= 0 ? "上漲" : "下跌"}${Math.abs(raw.soxIndex.changePct).toFixed(2)}%`);
   }
   if (raw.taiexIndex && raw.taiexIndex.changePct != null) {
     score += Math.sign(raw.taiexIndex.changePct) * 0.4; weightSum += 0.4;
