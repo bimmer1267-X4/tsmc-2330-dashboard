@@ -832,6 +832,7 @@
       low: h.low ?? h.close,
       close: h.close,
       volume: h.volume ?? 0,
+      hasOhlc: h.open != null,
     }));
     const n2 = bars.length;
 
@@ -892,16 +893,27 @@
     }
 
     const candleW = Math.max(1.2, Math.min(6, (W2-padL2-padR2)/n2*0.6));
+    const dotR = Math.max(1.5, Math.min(3.5, candleW*0.6));
     bars.forEach((b,i) => {
       const cx = x2(i);
-      const up = b.close >= b.open;
       // 台股慣例配色：漲紅、跌綠（跟--up/--down這兩個變數字面上的名字剛好相反，那兩個是
       // 主K線圖沿用的美式配色，這裡改用--critical(紅)/--good(綠)這兩個既有的主題色變數，
       // 兩者本身就有支援亮/暗色模式，不用另外定義新變數）。
-      const color = up ? 'var(--critical)' : 'var(--good)';
-      svg2.appendChild(el('line', {x1:cx,x2:cx,y1:y2(b.high),y2:y2(b.low), stroke:color, 'stroke-width':1}));
-      const bodyTop = y2(Math.max(b.open,b.close)), bodyBot = y2(Math.min(b.open,b.close));
-      svg2.appendChild(el('rect', {x:cx-candleW/2, y:bodyTop, width:candleW, height:Math.max(1,bodyBot-bodyTop), fill:color}));
+      if (b.hasOhlc) {
+        // 有真實開高低收的交易日：正常蠟燭，漲跌看「當天開盤vs收盤」。
+        const up = b.close >= b.open;
+        const color = up ? 'var(--critical)' : 'var(--good)';
+        svg2.appendChild(el('line', {x1:cx,x2:cx,y1:y2(b.high),y2:y2(b.low), stroke:color, 'stroke-width':1}));
+        const bodyTop = y2(Math.max(b.open,b.close)), bodyBot = y2(Math.min(b.open,b.close));
+        svg2.appendChild(el('rect', {x:cx-candleW/2, y:bodyTop, width:candleW, height:Math.max(1,bodyBot-bodyTop), fill:color}));
+      } else {
+        // 只有收盤價、沒有開高低的舊資料(種子CSV回填那批)：畫不出真蠟燭，改用實心圓標出
+        // 收盤價位置，漲跌看「這天收盤vs前一天收盤」(沒有開盤價可比，只能比前一天)；
+        // 沒有前一天可比的第一筆(i===0)沒有漲跌基準，預設當作紅色(漲)處理。
+        const up = i === 0 ? true : b.close >= bars[i-1].close;
+        const color = up ? 'var(--critical)' : 'var(--good)';
+        svg2.appendChild(el('circle', {cx, cy:y2(b.close), r:dotR, fill:color}));
+      }
     });
 
     // MA線：畫在蠟燭之上，跟主K線圖同一套drawLine手法(逐點連成一條path，null值處自然斷開)。
@@ -968,7 +980,8 @@
     function yVol(v) { return padTV + (HV-padTV-padBV) * (1 - v/maxV); }
     const barW2 = Math.max(1, (WV-padL2-padR2)/n2*0.7);
     bars.forEach((b,i) => {
-      const up = b.close >= b.open;
+      // 跟K線圖蠟燭同一套判斷邏輯：有真實開高低收才看當天開盤vs收盤，沒有的話退回比前一天收盤。
+      const up = b.hasOhlc ? (b.close >= b.open) : (i === 0 ? true : b.close >= bars[i-1].close);
       svgVol.appendChild(el('rect', {x:x2(i)-barW2/2, y:yVol(b.volume), width:barW2, height:HV-padBV-yVol(b.volume), fill: up?'var(--critical)':'var(--good)', opacity:0.55}));
     });
     axisLabel(svgVol, padL2-6, padTV+6, (maxV/1000).toFixed(0)+'K');
