@@ -954,21 +954,15 @@
       tooltip2.style.left = Math.min(rect.width-190, Math.max(0,(px/W2)*rect.width+10)) + 'px';
       tooltip2.style.top = '10px';
       tooltip2.innerHTML = '';
-      const r2 = ind2[i];
       const dateEl = document.createElement('div'); dateEl.className='t-date'; dateEl.textContent = b.date;
       tooltip2.appendChild(dateEl);
-      const rows2 = [
-        ['開', fmt(b.open,0), null], ['高', fmt(b.high,0), null], ['低', fmt(b.low,0), null], ['收', fmt(b.close,0), null],
-        ['MA5', fmt(r2.ma5,0), 'var(--ma5)'], ['MA20', fmt(r2.ma20,0), 'var(--ma20)'], ['MA60', fmt(r2.ma60,0), 'var(--ma60)']
-      ];
-      rows2.forEach(([k,v,color])=>{
-        const row = document.createElement('div'); row.className='t-row';
-        const kEl = document.createElement('span'); kEl.className='k';
-        if (color) { const key = document.createElement('span'); key.className='tkey'; key.style.background=color; kEl.appendChild(key); }
-        const kt = document.createElement('span'); kt.textContent = k; kEl.appendChild(kt);
-        const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = v;
-        row.appendChild(kEl); row.appendChild(vEl); tooltip2.appendChild(row);
-      });
+      // 只顯示收盤價：開高低對缺OHLC的舊資料(圓點那段)本來就是假的(退化用close填的)，
+      // 顯示出來反而誤導；MA也拿掉，滑動時要的是「這天收盤多少」的快速對照，不是完整
+      // 技術指標明細。
+      const row = document.createElement('div'); row.className='t-row';
+      const kEl = document.createElement('span'); kEl.className='k'; kEl.textContent = '收盤';
+      const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = fmt(b.close,0);
+      row.appendChild(kEl); row.appendChild(vEl); tooltip2.appendChild(row);
     });
     svg2.addEventListener('pointerleave', () => { tooltip2.style.display='none'; crosshair2.setAttribute('visibility','hidden'); });
 
