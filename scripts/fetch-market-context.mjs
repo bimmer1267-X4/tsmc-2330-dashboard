@@ -193,6 +193,10 @@ async function fetchTaifexNightClose(previous) {
   })))}`);
   night.sort((a, b) => String(a["ContractMonth(Week)"]).localeCompare(String(b["ContractMonth(Week)"])));
   const row = night[0];
+  // TEMP-DEBUG(欄位驗證用，用完即刪)：完整dump近月合約那一列的所有原始欄位，用來確認
+  // Open/OpeningPrice等欄位的精確名稱，好比照SettlementPrice/Last/ContractMonth(Week)
+  // 當初的驗證方式寫進正式的欄位擷取邏輯與註解。
+  console.log(`[TEMP-DEBUG] 近月合約完整原始欄位: ${JSON.stringify(row)}`);
   const close = toNum(row["SettlementPrice"]) ?? toNum(row["Last"]);
   if (close == null) throw new Error(`TX盤後資料找到但無法解析收盤價欄位，原始資料=${JSON.stringify(row)}`);
   const rawDate = row["Date"];
