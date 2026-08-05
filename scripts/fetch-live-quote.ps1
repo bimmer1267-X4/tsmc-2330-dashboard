@@ -63,23 +63,46 @@ function Invoke-JsonGet($url) {
     return $text | ConvertFrom-Json
 }
 
+# 改用futDataDown端點取代openapi.taifex.com.tw——原因見fetch-market-context.ps1的
+# Get-TaifexNightClose同一段註解(openapi那支「即時」API實測是每日批次更新一次，夜盤
+# 交易時段內完全不會變；futDataDown才會即時反映夜盤交易中的最新成交)。
+try {
+    Add-Type -AssemblyName System.Text.Encoding.CodePages -ErrorAction SilentlyContinue
+    [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
+} catch {
+    # Windows PowerShell 5.1沒有這個組件、或Provider已經註冊過，兩種情況都安全忽略
+}
+
 function Update-TaifexNightClose($Raw) {
-    $rows = Invoke-JsonGet "https://openapi.taifex.com.tw/v1/DailyMarketReportFut"
-    if (-not $rows -or $rows.Count -eq 0) { return $false }
-    $night = $rows | Where-Object { $_.Contract -eq "TX" -and $_.TradingSession -eq "盤後" }
+    $nowTaipei = (Get-Date).ToUniversalTime().AddHours(8)
+    $endStr = $nowTaipei.ToString("yyyy/MM/dd")
+    $startStr = $nowTaipei.AddDays(-5).ToString("yyyy/MM/dd")
+    $body = "down_type=1&commodity_id=TX&commodity_id2=&queryStartDate=$startStr&queryEndDate=$endStr"
+    $resp = Invoke-WebRequest -Uri "https://www.taifex.com.tw/cht/3/futDataDown" -Method Post `
+        -Body $body -ContentType "application/x-www-form-urlencoded" -UserAgent $UA -TimeoutSec 30 -UseBasicParsing
+    $bytes = $resp.RawContentStream.ToArray()
+    $text = [System.Text.Encoding]::GetEncoding(950).GetString($bytes)
+    $lines = $text -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 }
+    if ($lines.Count -lt 2) { return $false }
+    # 欄位順序驗證見fetch-market-context.ps1的Get-TaifexFutDataDownRows同一段註解。
+    $night = $lines[1..($lines.Count - 1)] | ForEach-Object {
+        $c = $_ -split ","
+        [PSCustomObject]@{
+            date = $c[0]; contract = $c[1]; contractMonth = $c[2].Trim()
+            open = (ConvertTo-Num $c[3]); high = (ConvertTo-Num $c[4]); low = (ConvertTo-Num $c[5]); close = (ConvertTo-Num $c[6])
+            volume = (ConvertTo-Num $c[9]); settlement = (ConvertTo-Num $c[10]); session = $c[17]
+        }
+    } | Where-Object { $_.contract -eq "TX" -and $_.session -eq "盤後" -and $_.contractMonth -notlike "*/*" }
     if (-not $night -or $night.Count -eq 0) { return $false }
-    $row = $night | Sort-Object { [string]$_.'ContractMonth(Week)' } | Select-Object -First 1
-    $close = ConvertTo-Num $row.SettlementPrice
-    if (-not $close) { $close = ConvertTo-Num $row.Last }
+    $maxDate = ($night | Sort-Object date -Descending | Select-Object -First 1).date
+    $row = $night | Where-Object { $_.date -eq $maxDate } | Sort-Object contractMonth | Select-Object -First 1
+
+    $close = $row.settlement
+    if (-not $close) { $close = $row.close }
     if (-not $close) { return $false }
-    # 欄位名稱驗證見fetch-market-context.ps1的Get-TaifexNightClose同一段註解。
-    $open = ConvertTo-Num $row.Open
-    $high = ConvertTo-Num $row.High
-    $low = ConvertTo-Num $row.Low
-    $volume = ConvertTo-Num $row.Volume
-    if (-not $row.Date -or ([string]$row.Date).Length -ne 8) { return $false }
-    $d = [string]$row.Date
-    $isoDate = "{0}-{1}-{2}" -f $d.Substring(0,4), $d.Substring(4,2), $d.Substring(6,2)
+    $open = $row.open; $high = $row.high; $low = $row.low; $volume = $row.volume
+    if (-not $row.date) { return $false }
+    $isoDate = $row.date -replace "/", "-"
 
     $prev = $Raw.taifexNightClose
     if (-not $prev -or $prev.date -ne $isoDate) {
@@ -89,13 +112,13 @@ function Update-TaifexNightClose($Raw) {
             $changePts = [math]::Round($close - $prev.close, 2)
         }
         $Raw | Add-Member -MemberType NoteProperty -Name "taifexNightClose" -Value ([PSCustomObject]@{
-            contractMonth = $row.'ContractMonth(Week)'; close = $close; changePct = $changePct; changePts = $changePts
+            contractMonth = $row.contractMonth; close = $close; changePct = $changePct; changePts = $changePts
             open = $open; high = $high; low = $low; volume = $volume; date = $isoDate
         }) -Force
         return $true
     } elseif ($prev.close -ne $close -or $prev.open -ne $open -or $prev.high -ne $high -or $prev.low -ne $low -or $prev.volume -ne $volume) {
         $prev.close = $close; $prev.open = $open; $prev.high = $high; $prev.low = $low; $prev.volume = $volume
-        if ($row.'ContractMonth(Week)') { $prev.contractMonth = $row.'ContractMonth(Week)' }
+        if ($row.contractMonth) { $prev.contractMonth = $row.contractMonth }
         Write-Host "已校正 taifexNightClose: 收盤 -> $close"
         return $true
     }

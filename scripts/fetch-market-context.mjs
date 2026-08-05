@@ -155,76 +155,106 @@ async function fetchOptionsMarket() {
   };
 }
 
-// 台指期(TX)近月合約盤後交易時段(夜盤)最新成交/收盤價。跟fetchOptionsMarket同一個
-// TAIFEX OpenAPI，用DailyMarketReportFut這個「期貨」版本的對應端點(Opt是選擇權版本)。
-// 盤後(夜盤，15:00~次日05:00)交易與結算是併入「次一般交易時段」處理，不是獨立公告，
-// 所以每日排程06:00執行時，前一晚05:00收盤的夜盤最後成交價理論上已經可以查得到。
-// 近月合約：依「交易月份」字串排序取最小的一筆，避免自己手動算合約代碼(每月換月)。
+// 台指期(TX)近月合約盤後交易時段(夜盤)最新成交/收盤價。
 //
-// 欄位名稱已用實際回傳資料驗證過(2026-07-28 GitHub Actions run)：收盤價欄位是"Last"
-// 或"SettlementPrice"，合約月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/
-// "ContractMonth"。開高低量欄位也已驗證過(2026-08-05 GitHub Actions run，完整原始列：
-// {"Date":"20260804",...,"Open":"43003","High":"43165","Low":"42104","Last":"43152",
-// "Change":"-67","%":"-0.16%","Volume":"51504","SettlementPrice":"NULL",...})，就是
-// 直白的"Open"/"High"/"Low"/"Volume"。
+// 原本用openapi.taifex.com.tw/v1/DailyMarketReportFut，2026-08-05實測發現這個「即時」
+// API其實是「每日批次更新一次」，不是真即時：同一天19:40(距離當晚夜盤05:00收盤還有
+// 9小時多、夜盤才剛開盤4.5小時)重複查詢，回傳的還是前一場已經收盤超過13小時的舊資料，
+// 一個位元都沒變過。這就是「抓到的是前一日夜盤收盤價」問題的根本原因——不是抓取邏輯的
+// bug，是這個特定API端點本身沒有在夜盤交易時段內更新。
 //
-// 2026-07-28實際比對發現：06:00這次排程抓到的"Last"(43369)跟外部來源(玩股網等)公布
-// 的官方夜盤收盤(43172)對不上，落差達197點——當時SettlementPrice還是字串"NULL"，代表
-// 結算價要等隔天併入一般交易時段(08:45後)才會算出來，06:00查到的"Last"很可能只是報表
-// 產生當下還沒收齊全部成交的暫定值。因此改成優先採用SettlementPrice(官方結算價，一旦
-// 算出來就不會再變)，只有SettlementPrice還沒算出來時才退回Last當暫定值；真正的校正靠
-// fetch-live-quote.mjs在09:02~14:02交易時段每5分鐘重抓一次，一旦SettlementPrice算出來
-// 就會自動覆蓋掉暫定的Last值。
-//
-// openapi.taifex.com.tw僅提供「最新一個交易日」，沒有歷史查詢功能，沒辦法直接跟API要
-// 前一天的收盤價來算漲跌%。改成把上一次寫進data.json的taifexNightClose當作前一天的
-// 基準，跟這次新抓到的比較。夜盤要整個交易日（日盤+夜盤）都結束才會公布，所以如果排程
-// 執行的時間點太早（例如手動在傍晚觸發，當天自己的夜盤還沒收），API仍會回傳跟上次一樣
-// 的舊資料——這種情況下"date"會跟上一筆存的相同，此時不能拿來算漲跌%(會變成拿同一天
-// 跟自己比較)，直接把changePct留null，等到真的有新一天的資料進來才計算。
+// 改用TAIFEX官方網站自己在用的「期貨每日交易行情下載」表單背後的端點
+// (https://www.taifex.com.tw/cht/3/futDataDown，POST表單，回傳Big5編碼CSV)。同一個
+// 19:40時間點實測：這個端點查得到的TX近月合約盤後列，"交易日期"已經是當天、"收盤價"
+// (實際上是最後成交價，結算價欄位還是"-"表示尚未結算)持續反映當晚夜盤最新成交，證實
+// 是真正跟得上進度的資料源。表頭欄位、資料格式都已用實際回傳驗證過(2026-08-05
+// GitHub Actions run)：
+//   交易日期,契約,到期月份(週別),開盤價,最高價,最低價,收盤價,漲跌價,漲跌%,成交量,
+//   結算價,未沖銷契約數,最後最佳買價,最後最佳賣價,歷史最高價,歷史最低價,
+//   是否因訊息面暫停交易,交易時段,價差對單式委託成交量
+// "交易時段"欄位是"一般"(日盤)或"盤後"(夜盤)，同一天同一合約各一列。
+async function fetchTaifexFutDataDownCsv(startDate, endDate) {
+  const params = new URLSearchParams({
+    down_type: "1",
+    commodity_id: "TX",
+    commodity_id2: "",
+    queryStartDate: startDate,
+    queryEndDate: endDate,
+  });
+  const res = await fetch("https://www.taifex.com.tw/cht/3/futDataDown", {
+    method: "POST",
+    headers: { "User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded" },
+    body: params.toString(),
+  });
+  if (!res.ok) throw new Error(`futDataDown HTTP ${res.status}`);
+  const buf = await res.arrayBuffer();
+  const text = new TextDecoder("big5").decode(buf);
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length < 2) throw new Error(`futDataDown回傳內容為空或格式不符：${text.slice(0, 200)}`);
+  return lines.slice(1).map((line) => {
+    const c = line.split(",");
+    return {
+      date: c[0],
+      contract: c[1],
+      contractMonth: (c[2] || "").trim(),
+      open: toNum(c[3]),
+      high: toNum(c[4]),
+      low: toNum(c[5]),
+      close: toNum(c[6]),
+      volume: toNum(c[9]),
+      settlement: toNum(c[10]),
+      session: c[17],
+    };
+  });
+}
+
+// 從futDataDown回傳的多天多合約資料裡，挑出「範圍內最新交易日」的TX近月合約盤後列。
+// 用日期字串直接比較(yyyy/mm/dd格式，字典序等同時間序)；近月合約用到期月份字串排序取
+// 最小的一筆，跳過含"/"的價差合約列(例如"202608/202609"這種跨月價差)。
+function pickLatestNightRow(rows) {
+  const night = rows.filter((r) => r.contract === "TX" && r.session === "盤後" && !r.contractMonth.includes("/"));
+  if (night.length === 0) return null;
+  const maxDate = night.reduce((m, r) => (r.date > m ? r.date : m), night[0].date);
+  const candidates = night.filter((r) => r.date === maxDate);
+  candidates.sort((a, b) => a.contractMonth.localeCompare(b.contractMonth));
+  return candidates[0];
+}
+
+// 把UTC時間轉成台北時間(UTC+8)的"yyyy/mm/dd"字串，供futDataDown的查詢日期參數使用。
+function taipeiDateStr(d) {
+  const t = new Date(d.getTime() + 8 * 3600 * 1000);
+  return `${t.getUTCFullYear()}/${String(t.getUTCMonth() + 1).padStart(2, "0")}/${String(t.getUTCDate()).padStart(2, "0")}`;
+}
+
+// openapi.taifex.com.tw僅提供「最新一個交易日」、futDataDown則是依日期範圍查詢，沒辦法
+// 直接跟API要前一天的收盤價來算漲跌%。改成把上一次寫進data.json的taifexNightClose當作
+// 前一天的基準，跟這次新抓到的比較；date沒變就代表還是同一場夜盤(校正)，不能拿來算
+// 漲跌%(會變成拿同一天跟自己比較)，直接把changePct留null。
 async function fetchTaifexNightClose(previous) {
-  const rows = await fetchJson("https://openapi.taifex.com.tw/v1/DailyMarketReportFut");
-  if (!Array.isArray(rows) || rows.length === 0) throw new Error("DailyMarketReportFut 回傳空資料");
-  const night = rows.filter((r) => r["Contract"] === "TX" && r["TradingSession"] === "盤後");
-  if (night.length === 0) {
-    throw new Error(`找不到TX盤後(夜盤)時段資料，回傳筆數=${rows.length}，範例欄位=${JSON.stringify(Object.keys(rows[0] || {}))}`);
-  }
-  // 除錯用：印出所有候選合約，人工核對「近月」該取哪一筆——TX代碼下可能同時混著月合約
-  // 跟週合約，光靠ContractMonth(Week)字串排序不一定挑得對，需要實際比對回傳內容才能確定。
-  console.log(`[台指期夜盤] 找到 ${night.length} 筆TX盤後候選資料: ${JSON.stringify(night.map((r) => ({
-    contractMonth: r["ContractMonth(Week)"], last: r["Last"], low: r["Low"], high: r["High"], volume: r["Volume"],
-  })))}`);
-  night.sort((a, b) => String(a["ContractMonth(Week)"]).localeCompare(String(b["ContractMonth(Week)"])));
-  const row = night[0];
-  const close = toNum(row["SettlementPrice"]) ?? toNum(row["Last"]);
+  // 查近5個日曆天(涵蓋連假造成的交易日空隙)到今天，確保一定抓得到「範圍內最新一筆」。
+  const now = new Date();
+  const endStr = taipeiDateStr(now);
+  const startStr = taipeiDateStr(new Date(now.getTime() - 5 * 24 * 3600 * 1000));
+  const rows = await fetchTaifexFutDataDownCsv(startStr, endStr);
+  const row = pickLatestNightRow(rows);
+  if (!row) throw new Error(`futDataDown找不到TX盤後(夜盤)資料，查詢範圍=${startStr}~${endStr}`);
+  const close = row.settlement ?? row.close;
   if (close == null) throw new Error(`TX盤後資料找到但無法解析收盤價欄位，原始資料=${JSON.stringify(row)}`);
-  // OHLC/成交量：欄位名稱已用實際回傳資料驗證過(2026-08-05 GitHub Actions run)，就是
-  // 直白的"Open"/"High"/"Low"/"Volume"，數值是字串。這幾個欄位供夜盤K線圖使用；不用
-  // TAIFEX原始回傳裡自帶的"Change"/"%"欄位——那兩個欄位的計算基準沒有驗證過(可能是跟
-  // 日盤比而不是跟前一場夜盤比)，我們自己的changePct/changePts維持用「這場夜盤 vs 前一場
-  // 夜盤」的口徑計算，跟前端「夜盤自己比自己」的既有邏輯一致。
-  const open = toNum(row["Open"]);
-  const high = toNum(row["High"]);
-  const low = toNum(row["Low"]);
-  const volume = toNum(row["Volume"]);
-  const rawDate = row["Date"];
-  const date = rawDate && String(rawDate).length === 8
-    ? `${String(rawDate).slice(0, 4)}-${String(rawDate).slice(4, 6)}-${String(rawDate).slice(6, 8)}`
-    : null;
+  const date = row.date.replace(/\//g, "-");
   let changePct = null, changePts = null;
   if (previous && previous.close != null && previous.date && date && previous.date !== date) {
     changePct = Math.round((close / previous.close - 1) * 10000) / 100;
     changePts = Math.round((close - previous.close) * 100) / 100;
   }
   return {
-    contractMonth: row["ContractMonth(Week)"] || null,
+    contractMonth: row.contractMonth || null,
     close,
     changePct,
     changePts,
-    open,
-    high,
-    low,
-    volume,
+    open: row.open,
+    high: row.high,
+    low: row.low,
+    volume: row.volume,
     date,
   };
 }

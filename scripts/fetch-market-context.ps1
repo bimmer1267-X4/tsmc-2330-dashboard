@@ -153,63 +153,82 @@ function Get-OptionsMarket {
     return [PSCustomObject]@{ date = $isoDate; callOI = $callOI; putOI = $putOI; putCallRatio = $ratio }
 }
 
-# 台指期(TX)近月合約盤後交易時段(夜盤)最新成交/收盤價。跟Get-OptionsMarket同一個TAIFEX
-# OpenAPI，用DailyMarketReportFut這個「期貨」版本的對應端點(Opt是選擇權版本)。盤後(夜盤，
-# 15:00~次日05:00)交易與結算併入「次一般交易時段」處理，不是獨立公告，所以每日排程06:00
-# 執行時，前一晚05:00收盤的夜盤最後成交價理論上已經可以查得到。近月合約：依「交易月份」
-# 字串排序取最小的一筆，避免自己手動算合約代碼(每月換月)。
+# 台指期(TX)近月合約盤後交易時段(夜盤)最新成交/收盤價。
 #
-# 欄位名稱已用實際回傳資料驗證過(2026-07-28 GitHub Actions run)：收盤價欄位是"Last"
-# 或"SettlementPrice"，合約月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/
-# "ContractMonth"。
+# 原本用openapi.taifex.com.tw/v1/DailyMarketReportFut，2026-08-05實測發現這個「即時」
+# API其實是「每日批次更新一次」，不是真即時：同一天19:40(距離當晚夜盤05:00收盤還有
+# 9小時多、夜盤才剛開盤4.5小時)重複查詢，回傳的還是前一場已經收盤超過13小時的舊資料，
+# 一個位元都沒變過。這就是「抓到的是前一日夜盤收盤價」問題的根本原因——不是抓取邏輯的
+# bug，是這個特定API端點本身沒有在夜盤交易時段內更新。
 #
-# 2026-07-28實際比對發現：06:00這次排程抓到的"Last"(43369)跟外部來源(玩股網等)公布
-# 的官方夜盤收盤(43172)對不上，落差達197點——當時SettlementPrice還是字串"NULL"，代表
-# 結算價要等隔天併入一般交易時段(08:45後)才會算出來，06:00查到的"Last"很可能只是報表
-# 產生當下還沒收齊全部成交的暫定值。因此改成優先採用SettlementPrice(官方結算價，一旦
-# 算出來就不會再變)，只有SettlementPrice還沒算出來時才退回Last當暫定值；真正的校正靠
-# fetch-live-quote.ps1在09:02~14:02交易時段每5分鐘重抓一次，一旦SettlementPrice算出來
-# 就會自動覆蓋掉暫定的Last值。
+# 改用TAIFEX官方網站自己在用的「期貨每日交易行情下載」表單背後的端點
+# (https://www.taifex.com.tw/cht/3/futDataDown，POST表單，回傳Big5編碼CSV)。同一個
+# 19:40時間點實測：這個端點查得到的TX近月合約盤後列，"交易日期"已經是當天、"收盤價"
+# (實際上是最後成交價，結算價欄位還是"-"表示尚未結算)持續反映當晚夜盤最新成交，證實
+# 是真正跟得上進度的資料源。表頭欄位、資料格式都已用實際回傳驗證過(2026-08-05
+# GitHub Actions run)：
+#   交易日期,契約,到期月份(週別),開盤價,最高價,最低價,收盤價,漲跌價,漲跌%,成交量,
+#   結算價,未沖銷契約數,最後最佳買價,最後最佳賣價,歷史最高價,歷史最低價,
+#   是否因訊息面暫停交易,交易時段,價差對單式委託成交量
+# "交易時段"欄位是"一般"(日盤)或"盤後"(夜盤)，同一天同一合約各一列。
 #
-# openapi.taifex.com.tw僅提供「最新一個交易日」，沒有歷史查詢功能，沒辦法直接跟API要
-# 前一天的收盤價來算漲跌%。改成把上一次寫進data.json的taifexNightClose當作前一天的
-# 基準，跟這次新抓到的比較。如果兩次的date相同(例如太早觸發、當天夜盤還沒收)，代表
-# 資料還沒真的往前推進，不能拿來算漲跌%，changePct留null。
+# .NET Core/PowerShell 7在不註冊CodePagesEncodingProvider的情況下無法解析Big5(950)，
+# Windows PowerShell 5.1則原生支援；這裡統一先嘗試註冊，失敗就當作已經內建，不影響後續。
+try {
+    Add-Type -AssemblyName System.Text.Encoding.CodePages -ErrorAction SilentlyContinue
+    [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
+} catch {
+    # Windows PowerShell 5.1沒有這個組件、或Provider已經註冊過，兩種情況都安全忽略
+}
+
+function Get-TaifexFutDataDownRows($StartDate, $EndDate) {
+    $body = "down_type=1&commodity_id=TX&commodity_id2=&queryStartDate=$StartDate&queryEndDate=$EndDate"
+    $resp = Invoke-WebRequest -Uri "https://www.taifex.com.tw/cht/3/futDataDown" -Method Post `
+        -Body $body -ContentType "application/x-www-form-urlencoded" -UserAgent $UA -TimeoutSec 30 -UseBasicParsing
+    $bytes = $resp.RawContentStream.ToArray()
+    $text = [System.Text.Encoding]::GetEncoding(950).GetString($bytes)
+    $lines = $text -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 }
+    if ($lines.Count -lt 2) { throw "futDataDown回傳內容為空或格式不符：$($text.Substring(0, [Math]::Min(200, $text.Length)))" }
+    return $lines[1..($lines.Count - 1)] | ForEach-Object {
+        $c = $_ -split ","
+        [PSCustomObject]@{
+            date = $c[0]; contract = $c[1]; contractMonth = $c[2].Trim()
+            open = (ConvertTo-Num $c[3]); high = (ConvertTo-Num $c[4]); low = (ConvertTo-Num $c[5]); close = (ConvertTo-Num $c[6])
+            volume = (ConvertTo-Num $c[9]); settlement = (ConvertTo-Num $c[10]); session = $c[17]
+        }
+    }
+}
+
+function Select-LatestNightRow($Rows) {
+    $night = $Rows | Where-Object { $_.contract -eq "TX" -and $_.session -eq "盤後" -and $_.contractMonth -notlike "*/*" }
+    if (-not $night -or $night.Count -eq 0) { return $null }
+    $maxDate = ($night | Sort-Object date -Descending | Select-Object -First 1).date
+    return $night | Where-Object { $_.date -eq $maxDate } | Sort-Object contractMonth | Select-Object -First 1
+}
+
+# openapi.taifex.com.tw僅提供「最新一個交易日」、futDataDown則是依日期範圍查詢，沒辦法
+# 直接跟API要前一天的收盤價來算漲跌%。改成把上一次寫進data.json的taifexNightClose當作
+# 前一天的基準，跟這次新抓到的比較。如果兩次的date相同(例如太早觸發、當天夜盤還沒收)，
+# 代表資料還沒真的往前推進，不能拿來算漲跌%，changePct留null。
 function Get-TaifexNightClose($Previous) {
-    $rows = Invoke-JsonGet "https://openapi.taifex.com.tw/v1/DailyMarketReportFut"
-    if (-not $rows -or $rows.Count -eq 0) { throw "DailyMarketReportFut 回傳空資料" }
-    $night = $rows | Where-Object { $_.Contract -eq "TX" -and $_.TradingSession -eq "盤後" }
-    if (-not $night -or $night.Count -eq 0) {
-        $sampleFields = ($rows[0] | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ","
-        throw "找不到TX盤後(夜盤)時段資料，回傳筆數=$($rows.Count)，範例欄位=$sampleFields"
-    }
-    # 除錯用：印出所有候選合約，人工核對「近月」該取哪一筆
-    $candidates = $night | ForEach-Object { [PSCustomObject]@{ contractMonth = $_.'ContractMonth(Week)'; last = $_.Last; low = $_.Low; high = $_.High; volume = $_.Volume } }
-    Write-Host "[台指期夜盤] 找到 $($night.Count) 筆TX盤後候選資料: $($candidates | ConvertTo-Json -Compress)"
-    $row = $night | Sort-Object { [string]$_.'ContractMonth(Week)' } | Select-Object -First 1
-    $close = ConvertTo-Num $row.SettlementPrice
-    if (-not $close) { $close = ConvertTo-Num $row.Last }
+    $nowTaipei = (Get-Date).ToUniversalTime().AddHours(8)
+    $endStr = $nowTaipei.ToString("yyyy/MM/dd")
+    $startStr = $nowTaipei.AddDays(-5).ToString("yyyy/MM/dd")
+    $rows = Get-TaifexFutDataDownRows $startStr $endStr
+    $row = Select-LatestNightRow $rows
+    if (-not $row) { throw "futDataDown找不到TX盤後(夜盤)資料，查詢範圍=$startStr~$endStr" }
+    $close = $row.settlement
+    if (-not $close) { $close = $row.close }
     if (-not $close) { throw "TX盤後資料找到但無法解析收盤價欄位，原始資料=$($row | ConvertTo-Json -Compress)" }
-    # 欄位名稱已用實際回傳資料驗證過(2026-08-05 GitHub Actions run)：直白的"Open"/"High"/
-    # "Low"/"Volume"。不用TAIFEX原始回傳裡自帶的"Change"/"%"欄位——那兩個欄位的計算基準
-    # 沒有驗證過，我們自己的changePct/changePts維持用「這場夜盤 vs 前一場夜盤」的口徑計算。
-    $open = ConvertTo-Num $row.Open
-    $high = ConvertTo-Num $row.High
-    $low = ConvertTo-Num $row.Low
-    $volume = ConvertTo-Num $row.Volume
-    $isoDate = $null
-    if ($row.Date -and ([string]$row.Date).Length -eq 8) {
-        $d = [string]$row.Date
-        $isoDate = "{0}-{1}-{2}" -f $d.Substring(0,4), $d.Substring(4,2), $d.Substring(6,2)
-    }
+    $isoDate = $row.date -replace "/", "-"
     $changePct = $null; $changePts = $null
     if ($Previous -and $Previous.close -and $Previous.date -and $isoDate -and $Previous.date -ne $isoDate) {
         $changePct = [math]::Round((($close / $Previous.close) - 1) * 100, 2)
         $changePts = [math]::Round($close - $Previous.close, 2)
     }
     return [PSCustomObject]@{
-        contractMonth = $row.'ContractMonth(Week)'; close = $close; changePct = $changePct; changePts = $changePts
-        open = $open; high = $high; low = $low; volume = $volume; date = $isoDate
+        contractMonth = $row.contractMonth; close = $close; changePct = $changePct; changePts = $changePts
+        open = $row.open; high = $row.high; low = $row.low; volume = $row.volume; date = $isoDate
     }
 }
 
