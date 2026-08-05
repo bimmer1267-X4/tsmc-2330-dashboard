@@ -130,6 +130,19 @@
   <div class="metrics" id="metrics-grid"></div>
 </div>
 
+<div class="card" id="taifex-night-card">
+  <div style="font-weight:600; margin-bottom:2px;">台指期夜盤收盤價 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
+  <div class="sub" id="taifex-night-sub">--</div>
+  <div class="header-row">
+    <div>
+      <div class="hero" id="taifex-night-price" style="font-size:36px;">--</div>
+      <div><span class="delta" id="taifex-night-delta"></span></div>
+    </div>
+  </div>
+  <div style="font-weight:600; margin:14px 0 6px;">夜盤K線圖（近6個月）</div>
+  <div class="chart-wrap"><svg id="chart-taifex-night" width="100%" viewBox="0 0 900 240" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-taifex-night"></div></div>
+</div>
+
 <div class="card" id="market-context-card">
   <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:4px 12px; margin-bottom:2px;">
     <div style="font-weight:600;">籌碼面與大盤指數 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
@@ -180,19 +193,6 @@
       <tbody id="analog-tbody"></tbody>
     </table>
   </div>
-</div>
-
-<div class="card" id="taifex-night-card">
-  <div style="font-weight:600; margin-bottom:2px;">台指期夜盤收盤價 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
-  <div class="sub" id="taifex-night-sub">--</div>
-  <div class="header-row">
-    <div>
-      <div class="hero" id="taifex-night-price" style="font-size:36px;">--</div>
-      <div><span class="delta" id="taifex-night-delta"></span></div>
-    </div>
-  </div>
-  <div style="font-weight:600; margin:14px 0 6px;">夜盤K線圖（近6個月）</div>
-  <div class="chart-wrap"><svg id="chart-taifex-night" width="100%" viewBox="0 0 900 240" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-taifex-night"></div></div>
 </div>
 
 <div class="card" id="prediction-accuracy-card">
