@@ -32,7 +32,7 @@ jobs:
       # 四變數模型要用「今天」的d.taifexNightClose(TX夜盤變動%)當即時輸入，這裡先跑完
       # 才能確保讀到的是今天剛更新的值，不是還沒更新的昨天舊值。
       #
-      # 跟下面merge-and-classify.mjs同一套鎖定時間窗(手動觸發+13:30~隔日08:00)，理由見
+      # 跟下面merge-and-classify.mjs同一套鎖定時間窗(手動觸發+13:30~隔日05:50)，理由見
       # 下面那個step的註解——「籌碼面與大盤指數」卡片這幾個欄位(SOX/TAIEX/三大法人/融資
       # 融券/選擇權未平倉/籌碼面研判)其實本身不像盤前預測有自我矛盾的問題，這裡鎖定純粹是
       # 為了讓使用者在鎖定時間窗內看到的卡片行為一致。台指期夜盤(taifexNightClose)不受
@@ -40,8 +40,8 @@ jobs:
       - name: Fetch margin trading / SOX+TAIEX / ex-dividend / options open interest
         run: |
           HOURMIN=$((10#$(TZ=Asia/Taipei date +%H%M)))
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && { [ "$HOURMIN" -ge 1330 ] || [ "$HOURMIN" -lt 800 ]; }; then
-            echo "手動觸發且落在鎖定時間窗(13:30~隔日08:00)內，籌碼面/大盤指數維持上一次的值，只更新夜盤資料"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && { [ "$HOURMIN" -ge 1330 ] || [ "$HOURMIN" -lt 550 ]; }; then
+            echo "手動觸發且落在鎖定時間窗(13:30~隔日05:50)內，籌碼面/大盤指數維持上一次的值，只更新夜盤資料"
             node scripts/fetch-market-context.mjs --skip-market-context
           else
             node scripts/fetch-market-context.mjs
@@ -55,14 +55,22 @@ jobs:
       #
       # 只限制手動觸發(workflow_dispatch)，排程本身(schedule)永遠跑完整模式——06:00排程
       # 就是唯一真正該重算這兩張卡片的時間點，不受這個時間窗限制。鎖定時間窗訂在當天13:30
-      # (台股收盤)～隔日08:00(06:00排程理論上已經跑完)：這段期間內手動觸發，改用已經存在
-      # 的--backfill-only模式(post-close-update.yml本來就在用)，只回填收盤價相關資料跟
-      # 準確度追蹤，完全不碰d.openPrediction/d.adrAnalogMatches。
+      # (台股收盤)～隔日05:50：這段期間內手動觸發，改用已經存在的--backfill-only模式
+      # (post-close-update.yml本來就在用)，只回填收盤價相關資料跟準確度追蹤，完全不碰
+      # d.openPrediction/d.adrAnalogMatches。
+      #
+      # 邊界原本訂在08:00，後來發現：Claude Code Remote的Routine(取代已證實會delay/漏跳
+      # 的原生schedule cron、用可靠的workflow_dispatch API每天06:00左右觸發這個workflow)
+      # 本身也是workflow_dispatch事件，會被鎖定時間窗誤判成使用者手動測試——實測這個
+      # Routine曾在06:15才真正觸發(比06:00目標晚約15分鐘)，若邊界訂在08:00，只要原生
+      # schedule那天剛好沒觸發(它已知會delay/漏跳)，就沒有其他機會能補上完整重算，
+      # 導致這兩張卡片卡住不更新。邊界改到05:50，05:50~13:30之間有近8小時緩衝，遠大於
+      # 實測的15分鐘延遲，可以合理涵蓋Routine觸發時間的正常漂移範圍。
       - name: Merge ADR/FX + classify valuation zone
         run: |
           HOURMIN=$((10#$(TZ=Asia/Taipei date +%H%M)))
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && { [ "$HOURMIN" -ge 1330 ] || [ "$HOURMIN" -lt 800 ]; }; then
-            echo "手動觸發且落在鎖定時間窗(13:30~隔日08:00)內，只回填收盤價相關資料，不重算盤前預測/ADR類比估計"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && { [ "$HOURMIN" -ge 1330 ] || [ "$HOURMIN" -lt 550 ]; }; then
+            echo "手動觸發且落在鎖定時間窗(13:30~隔日05:50)內，只回填收盤價相關資料，不重算盤前預測/ADR類比估計"
             node scripts/merge-and-classify.mjs --backfill-only
           else
             node scripts/merge-and-classify.mjs
