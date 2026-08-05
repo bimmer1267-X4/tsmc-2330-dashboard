@@ -163,7 +163,10 @@ async function fetchOptionsMarket() {
 //
 // 欄位名稱已用實際回傳資料驗證過(2026-07-28 GitHub Actions run)：收盤價欄位是"Last"
 // 或"SettlementPrice"，合約月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/
-// "ContractMonth"。
+// "ContractMonth"。開高低量欄位也已驗證過(2026-08-05 GitHub Actions run，完整原始列：
+// {"Date":"20260804",...,"Open":"43003","High":"43165","Low":"42104","Last":"43152",
+// "Change":"-67","%":"-0.16%","Volume":"51504","SettlementPrice":"NULL",...})，就是
+// 直白的"Open"/"High"/"Low"/"Volume"。
 //
 // 2026-07-28實際比對發現：06:00這次排程抓到的"Last"(43369)跟外部來源(玩股網等)公布
 // 的官方夜盤收盤(43172)對不上，落差達197點——當時SettlementPrice還是字串"NULL"，代表
@@ -193,24 +196,35 @@ async function fetchTaifexNightClose(previous) {
   })))}`);
   night.sort((a, b) => String(a["ContractMonth(Week)"]).localeCompare(String(b["ContractMonth(Week)"])));
   const row = night[0];
-  // TEMP-DEBUG(欄位驗證用，用完即刪)：完整dump近月合約那一列的所有原始欄位，用來確認
-  // Open/OpeningPrice等欄位的精確名稱，好比照SettlementPrice/Last/ContractMonth(Week)
-  // 當初的驗證方式寫進正式的欄位擷取邏輯與註解。
-  console.log(`[TEMP-DEBUG] 近月合約完整原始欄位: ${JSON.stringify(row)}`);
   const close = toNum(row["SettlementPrice"]) ?? toNum(row["Last"]);
   if (close == null) throw new Error(`TX盤後資料找到但無法解析收盤價欄位，原始資料=${JSON.stringify(row)}`);
+  // OHLC/成交量：欄位名稱已用實際回傳資料驗證過(2026-08-05 GitHub Actions run)，就是
+  // 直白的"Open"/"High"/"Low"/"Volume"，數值是字串。這幾個欄位供夜盤K線圖使用；不用
+  // TAIFEX原始回傳裡自帶的"Change"/"%"欄位——那兩個欄位的計算基準沒有驗證過(可能是跟
+  // 日盤比而不是跟前一場夜盤比)，我們自己的changePct/changePts維持用「這場夜盤 vs 前一場
+  // 夜盤」的口徑計算，跟前端「夜盤自己比自己」的既有邏輯一致。
+  const open = toNum(row["Open"]);
+  const high = toNum(row["High"]);
+  const low = toNum(row["Low"]);
+  const volume = toNum(row["Volume"]);
   const rawDate = row["Date"];
   const date = rawDate && String(rawDate).length === 8
     ? `${String(rawDate).slice(0, 4)}-${String(rawDate).slice(4, 6)}-${String(rawDate).slice(6, 8)}`
     : null;
-  let changePct = null;
+  let changePct = null, changePts = null;
   if (previous && previous.close != null && previous.date && date && previous.date !== date) {
     changePct = Math.round((close / previous.close - 1) * 10000) / 100;
+    changePts = Math.round((close - previous.close) * 100) / 100;
   }
   return {
     contractMonth: row["ContractMonth(Week)"] || null,
     close,
     changePct,
+    changePts,
+    open,
+    high,
+    low,
+    volume,
     date,
   };
 }
@@ -289,7 +303,19 @@ async function appendTaifexNightHistory(previous, current) {
     // 檔案不存在或格式壞掉，視為空歷史，從頭建立
   }
   const byDate = new Map(history.map((h) => [h.date, h]));
-  byDate.set(previous.date, { date: previous.date, close: previous.close, changePct: previous.changePct ?? null });
+  // open/high/low/volume是後來才加的欄位，種子歷史(使用者提供的CSV回填那384筆)沒有這幾
+  // 個值，統一用??null讓欄位形狀固定，前端渲染K線圖時再自行判斷要不要退化處理，不在這裡
+  // 硬塞假資料。
+  byDate.set(previous.date, {
+    date: previous.date,
+    close: previous.close,
+    changePct: previous.changePct ?? null,
+    changePts: previous.changePts ?? null,
+    open: previous.open ?? null,
+    high: previous.high ?? null,
+    low: previous.low ?? null,
+    volume: previous.volume ?? null,
+  });
   const merged = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   await writeFile(TX_NIGHT_HISTORY_PATH, JSON.stringify(merged), "utf8");
   console.log(`已更新台指期夜盤歷史紀錄: ${TX_NIGHT_HISTORY_PATH}（累計 ${merged.length} 筆，新增/更新 ${previous.date}）`);

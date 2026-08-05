@@ -1080,6 +1080,11 @@ try {
     # 檔案不存在或格式壞掉，視為空歷史——四變數模型樣本數不足時會自動退回三變數版本
 }
 
+# 夜盤K線圖只需要近6個月子集，跟既有K線圖／ADR歷史相近價位類比估計的6個月語意一致
+# (Get-RecentMonthsSeries跟那兩個功能共用同一支函式)。完整歷史留在
+# data/taifex-night-history.json裡供V4模型訓練用，不整包灌進data.json。
+$d | Add-Member -NotePropertyName taifexNightHistory -NotePropertyValue (Get-RecentMonthsSeries $txNightHistory 6) -Force
+
 $impliedTwd = [math]::Round(($AdrPrice / $AdrRatio) * $UsdTwd, 2)
 $premiumPct = [math]::Round((($impliedTwd - $d.valuation.closePrice) / $d.valuation.closePrice) * 100, 2)
 

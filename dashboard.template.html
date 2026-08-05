@@ -182,6 +182,19 @@
   </div>
 </div>
 
+<div class="card" id="taifex-night-card">
+  <div style="font-weight:600; margin-bottom:2px;">台指期夜盤收盤價 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
+  <div class="sub" id="taifex-night-sub">--</div>
+  <div class="header-row">
+    <div>
+      <div class="hero" id="taifex-night-price" style="font-size:36px;">--</div>
+      <div><span class="delta" id="taifex-night-delta"></span></div>
+    </div>
+  </div>
+  <div style="font-weight:600; margin:14px 0 6px;">夜盤K線圖（近6個月）</div>
+  <div class="chart-wrap"><svg id="chart-taifex-night" width="100%" viewBox="0 0 900 240" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-taifex-night"></div></div>
+</div>
+
 <div class="card" id="prediction-accuracy-card">
   <div style="font-weight:600; margin-bottom:2px;">盤前股價預測準確度歷史追蹤 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
   <div class="sub">追蹤「盤前股價預測」(OLS模型)與「ADR歷史相近價位類比估計」這兩種方法過去交易日的預測結果 vs 當日實際收盤表現，評估各自的走勢命中率、平均誤差(偏誤)與信賴區間覆蓋率是否符合預期；樣本數不足時對應區間會先隱藏，避免早期少量樣本產生誤導性統計。⚠️ 兩種方法本身預測的是開盤價，這裡刻意改用收盤價驗證，所以看到的誤差包含了當天開盤後到收盤的盤中變動，不是純粹的開盤價預測誤差。</div>
@@ -770,6 +783,111 @@
     svg.addEventListener('pointermove', onMove);
     svg.addEventListener('pointerleave', () => { tooltipEl.style.display='none'; crosshair.setAttribute('visibility','hidden'); });
   }
+
+  // ---- 台指期夜盤收盤價 + K線圖 ----
+  // 這個IIFE要放在el/axisLabel/svgNS(上面attachHoverTooltip用到的那幾個共用SVG helper)
+  // 定義完之後才能執行——它們雖然是給下面daily-based的K線圖/副圖表用的，但函式本身跟
+  // daily無關，這裡也直接拿來用；只是不能沿用xScale/attachHoverTooltip本身(那兩個綁在
+  // 外層daily.length的閉包上)，夜盤序列筆數不一定跟daily一樣長，會對不起來，所以下面
+  // 另外自己刻一套局部的x軸換算跟十字線/tooltip，做法比照主K線圖那份不共用helper的寫法。
+  (function(){
+    const t = raw.taifexNightClose;
+    const card = document.getElementById('taifex-night-card');
+    if (!t) { if (card) card.style.display = 'none'; return; }
+
+    document.getElementById('taifex-night-price').textContent = fmt(t.close,0);
+    const deltaEl = document.getElementById('taifex-night-delta');
+    // changePts/changePct在「今天剛好是新的一場、還沒有前一場可以比」時會是null（理論上
+    // 只有歷史序列完全是空的最初期間才會發生），這裡讓delta整行留白而不是顯示"null"字樣。
+    if (t.changePts != null && t.changePct != null) {
+      deltaEl.textContent = (t.changePts>=0?'+':'') + fmt(t.changePts,0) + ' (' + (t.changePct>=0?'+':'') + fmt(t.changePct,2) + '%)';
+      deltaEl.className = 'delta ' + (t.changePts>=0?'up':'down');
+    } else {
+      deltaEl.textContent = '';
+    }
+
+    // 夜盤時間窗：TAIFEX用夜盤「開盤」那一天(15:00)當日期標示D，實際收盤在D+1清晨05:00
+    // (見fetch-market-context.mjs的fetchTaifexNightClose註解)。這裡把完整時間窗直接寫在
+    // 卡片上，讓使用者自己就能判斷這筆代表的是哪一場，不用另外記日期標示規則。純日曆
+    // 加一天，不查交易日曆——只是描述這一場實際開收盤的時間，不是下一個交易日。
+    const nightStart = new Date(t.date + 'T00:00:00Z');
+    const nightEnd = new Date(nightStart.getTime() + 24*3600*1000);
+    const fmtMD = (dt) => (dt.getUTCMonth()+1) + '/' + dt.getUTCDate();
+    document.getElementById('taifex-night-sub').textContent =
+      '這場夜盤時間窗：' + fmtMD(nightStart) + ' 15:00 ～ ' + fmtMD(nightEnd) + ' 05:00收盤' +
+      (t.contractMonth ? '（近月合約 ' + t.contractMonth + '）' : '');
+
+    // ---- K線圖：近6個月夜盤歷史(raw.taifexNightHistory) ----
+    const hist = raw.taifexNightHistory || [];
+    if (hist.length === 0) return;
+    // 種子歷史(使用者提供CSV回填的那384筆)沒有open/high/low，缺OHLC的列用close退化成
+    // 一條扁平線(open=high=low=close)，不回頭捏造假資料，也不因為缺欄位就整筆跳過不顯示。
+    const bars = hist.map((h) => ({
+      date: h.date,
+      open: h.open ?? h.close,
+      high: h.high ?? h.close,
+      low: h.low ?? h.close,
+      close: h.close,
+    }));
+    const n2 = bars.length;
+    const svg2 = document.getElementById('chart-taifex-night');
+    const W2 = 900, H2 = 240, padT2 = 10, padB2 = 20, padL2 = 50, padR2 = 10;
+    let lo2 = Infinity, hi2 = -Infinity;
+    bars.forEach((b) => { lo2 = Math.min(lo2, b.low); hi2 = Math.max(hi2, b.high); });
+    const pad2 = (hi2-lo2)*0.06 || Math.max(1, hi2*0.01); lo2 -= pad2; hi2 += pad2;
+    function y2(v) { return padT2 + (H2-padT2-padB2) * (1 - (v-lo2)/(hi2-lo2)); }
+    function x2(i) { return padL2 + (W2-padL2-padR2) * (i / Math.max(n2-1,1)); }
+
+    for (let k = 0; k <= 4; k++) {
+      const v = lo2 + (hi2-lo2)*k/4;
+      const yy = y2(v);
+      svg2.appendChild(el('line', {x1:padL2, x2:W2-padR2, y1:yy, y2:yy, stroke:'var(--grid)', 'stroke-width':1}));
+      axisLabel(svg2, padL2-6, yy+3, fmt(v,0), 'end');
+    }
+
+    const candleW = Math.max(1.2, Math.min(6, (W2-padL2-padR2)/n2*0.6));
+    bars.forEach((b,i) => {
+      const cx = x2(i);
+      const up = b.close >= b.open;
+      const color = up ? 'var(--up)' : 'var(--down)';
+      svg2.appendChild(el('line', {x1:cx,x2:cx,y1:y2(b.high),y2:y2(b.low), stroke:color, 'stroke-width':1}));
+      const bodyTop = y2(Math.max(b.open,b.close)), bodyBot = y2(Math.min(b.open,b.close));
+      svg2.appendChild(el('rect', {x:cx-candleW/2, y:bodyTop, width:candleW, height:Math.max(1,bodyBot-bodyTop), fill:color}));
+    });
+
+    [0, Math.floor(n2/2), n2-1].forEach((i) => {
+      if (i<0 || i>=n2) return;
+      axisLabel(svg2, x2(i), H2-4, bars[i].date.slice(5), 'middle');
+    });
+
+    const tooltip2 = document.getElementById('tooltip-taifex-night');
+    const hitRect2 = el('rect', {x:padL2, y:0, width:W2-padL2-padR2, height:H2, fill:'transparent'});
+    svg2.appendChild(hitRect2);
+    const crosshair2 = el('line', {x1:0,x2:0,y1:padT2,y2:H2-padB2, stroke:'var(--baseline)', 'stroke-width':1, visibility:'hidden'});
+    svg2.appendChild(crosshair2);
+    svg2.addEventListener('pointermove', (evt) => {
+      const rect = svg2.getBoundingClientRect();
+      const px = (evt.clientX - rect.left) / rect.width * W2;
+      let i = Math.round((px - padL2) / (W2 - padL2 - padR2) * (n2-1));
+      i = Math.max(0, Math.min(n2-1, i));
+      const cx = x2(i);
+      crosshair2.setAttribute('x1', cx); crosshair2.setAttribute('x2', cx); crosshair2.setAttribute('visibility','visible');
+      const b = bars[i];
+      tooltip2.style.display = 'block';
+      tooltip2.style.left = Math.min(rect.width-190, Math.max(0,(px/W2)*rect.width+10)) + 'px';
+      tooltip2.style.top = '10px';
+      tooltip2.innerHTML = '';
+      const dateEl = document.createElement('div'); dateEl.className='t-date'; dateEl.textContent = b.date;
+      tooltip2.appendChild(dateEl);
+      [['開', fmt(b.open,0)], ['高', fmt(b.high,0)], ['低', fmt(b.low,0)], ['收', fmt(b.close,0)]].forEach(([k,v])=>{
+        const row = document.createElement('div'); row.className='t-row';
+        const kEl = document.createElement('span'); kEl.className='k'; kEl.textContent = k;
+        const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = v;
+        row.appendChild(kEl); row.appendChild(vEl); tooltip2.appendChild(row);
+      });
+    });
+    svg2.addEventListener('pointerleave', () => { tooltip2.style.display='none'; crosshair2.setAttribute('visibility','hidden'); });
+  })();
 
   // ---- price chart (candlestick + MA + Bollinger) ----
   (function(){

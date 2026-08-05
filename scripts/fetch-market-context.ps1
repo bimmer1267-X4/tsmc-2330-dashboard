@@ -190,16 +190,27 @@ function Get-TaifexNightClose($Previous) {
     $close = ConvertTo-Num $row.SettlementPrice
     if (-not $close) { $close = ConvertTo-Num $row.Last }
     if (-not $close) { throw "TX盤後資料找到但無法解析收盤價欄位，原始資料=$($row | ConvertTo-Json -Compress)" }
+    # 欄位名稱已用實際回傳資料驗證過(2026-08-05 GitHub Actions run)：直白的"Open"/"High"/
+    # "Low"/"Volume"。不用TAIFEX原始回傳裡自帶的"Change"/"%"欄位——那兩個欄位的計算基準
+    # 沒有驗證過，我們自己的changePct/changePts維持用「這場夜盤 vs 前一場夜盤」的口徑計算。
+    $open = ConvertTo-Num $row.Open
+    $high = ConvertTo-Num $row.High
+    $low = ConvertTo-Num $row.Low
+    $volume = ConvertTo-Num $row.Volume
     $isoDate = $null
     if ($row.Date -and ([string]$row.Date).Length -eq 8) {
         $d = [string]$row.Date
         $isoDate = "{0}-{1}-{2}" -f $d.Substring(0,4), $d.Substring(4,2), $d.Substring(6,2)
     }
-    $changePct = $null
+    $changePct = $null; $changePts = $null
     if ($Previous -and $Previous.close -and $Previous.date -and $isoDate -and $Previous.date -ne $isoDate) {
         $changePct = [math]::Round((($close / $Previous.close) - 1) * 100, 2)
+        $changePts = [math]::Round($close - $Previous.close, 2)
     }
-    return [PSCustomObject]@{ contractMonth = $row.'ContractMonth(Week)'; close = $close; changePct = $changePct; date = $isoDate }
+    return [PSCustomObject]@{
+        contractMonth = $row.'ContractMonth(Week)'; close = $close; changePct = $changePct; changePts = $changePts
+        open = $open; high = $high; low = $low; volume = $volume; date = $isoDate
+    }
 }
 
 function Get-ChipTrend($Raw) {
@@ -275,7 +286,12 @@ function Update-TaifexNightHistory($Previous, $Current) {
     }
     $byDate = @{}
     foreach ($h in $history) { $byDate[$h.date] = $h }
-    $byDate[$Previous.date] = [PSCustomObject]@{ date = $Previous.date; close = $Previous.close; changePct = $Previous.changePct }
+    # open/high/low/volume是後來才加的欄位，種子歷史(使用者提供的CSV回填那384筆)沒有這幾
+    # 個值，統一存$null讓欄位形狀固定，前端渲染K線圖時再自行判斷要不要退化處理。
+    $byDate[$Previous.date] = [PSCustomObject]@{
+        date = $Previous.date; close = $Previous.close; changePct = $Previous.changePct; changePts = $Previous.changePts
+        open = $Previous.open; high = $Previous.high; low = $Previous.low; volume = $Previous.volume
+    }
     $merged = @($byDate.Values | Sort-Object date)
     $merged | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $TxNightHistoryPath -Encoding utf8
     Write-Host "已更新台指期夜盤歷史紀錄: $TxNightHistoryPath（累計 $($merged.Count) 筆，新增/更新 $($Previous.date)）"

@@ -1114,6 +1114,11 @@ async function main() {
     // 檔案不存在或格式壞掉，視為空歷史——四變數模型樣本數不足時會自動退回三變數版本
   }
 
+  // 夜盤K線圖只需要近6個月子集，跟既有K線圖／ADR歷史相近價位類比估計的6個月語意一致
+  // (filterSeriesToRecentMonths跟那兩個功能共用同一支函式)。完整歷史留在
+  // data/taifex-night-history.json裡供V4模型訓練用，不整包灌進data.json。
+  d.taifexNightHistory = filterSeriesToRecentMonths(txNightHistory, 6);
+
   const impliedTwd = Math.round(((adrPrice / adrRatio) * usdTwd) * 100) / 100;
   const premiumPct = Math.round((((impliedTwd - d.valuation.closePrice) / d.valuation.closePrice) * 100) * 100) / 100;
 
