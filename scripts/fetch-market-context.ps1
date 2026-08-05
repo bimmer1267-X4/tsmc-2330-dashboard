@@ -14,6 +14,7 @@ $ErrorActionPreference = "Stop"
 $StockNo = "2330"
 $UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 $DataPath = Join-Path $PSScriptRoot "..\data\data.json"
+$TxNightHistoryPath = Join-Path $PSScriptRoot "..\data\taifex-night-history.json"
 
 function ConvertTo-Num($s) {
     if ($null -eq $s) { return $null }
@@ -256,6 +257,30 @@ function Get-ChipTrend($Raw) {
     return [PSCustomObject]@{ verdict = $verdict; cls = $cls; reasons = $reasons; risk = $risk }
 }
 
+# 台指期(TX)夜盤歷史序列：永久保留、逐日累積(跟merge-and-classify.ps1的
+# Update-AdrPremiumHistory同一套read-try/catch→Map upsert-by-date→sort→write模式)，
+# 供「開盤價機率預估」四變數模型(Get-OpenGapModelV4)訓練用。只在「換日」那一刻
+# ($Previous.date -ne $Current.date)才把$Previous這筆append進去——因為$Previous換日後
+# 就確定不會再被Get-TaifexNightClose的校正邏輯改動(校正只發生在「同一個date」的情況)，
+# 此時才是它真正定案、可以永久寫入的時間點；$raw.taifexNightClose目前這筆(還在今天)
+# 則留給明天換日時才寫入，避免把還可能被SettlementPrice校正的暫定值寫死進歷史。
+function Update-TaifexNightHistory($Previous, $Current) {
+    if (-not $Previous -or $null -eq $Previous.close -or $null -eq $Previous.date) { return }
+    if (-not $Current -or $null -eq $Current.date -or $Current.date -eq $Previous.date) { return }
+    $history = @()
+    try {
+        $history = Get-Content $TxNightHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        # 檔案不存在或格式壞掉，視為空歷史，從頭建立
+    }
+    $byDate = @{}
+    foreach ($h in $history) { $byDate[$h.date] = $h }
+    $byDate[$Previous.date] = [PSCustomObject]@{ date = $Previous.date; close = $Previous.close; changePct = $Previous.changePct }
+    $merged = @($byDate.Values | Sort-Object date)
+    $merged | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $TxNightHistoryPath -Encoding utf8
+    Write-Host "已更新台指期夜盤歷史紀錄: $TxNightHistoryPath（累計 $($merged.Count) 筆，新增/更新 $($Previous.date)）"
+}
+
 function Invoke-Safe($label, [scriptblock]$fn) {
     try { return & $fn }
     catch {
@@ -271,6 +296,7 @@ $raw | Add-Member -MemberType NoteProperty -Name "soxIndex" -Value (Invoke-Safe 
 $raw | Add-Member -MemberType NoteProperty -Name "taiexIndex" -Value (Invoke-Safe "TAIEX指數" { Get-YahooIndex "^TWII" }) -Force
 $previousTaifexNightClose = $raw.taifexNightClose
 $raw | Add-Member -MemberType NoteProperty -Name "taifexNightClose" -Value (Invoke-Safe "台指期夜盤收盤" { Get-TaifexNightClose $previousTaifexNightClose }) -Force
+Invoke-Safe "台指期夜盤歷史紀錄累積" { Update-TaifexNightHistory $previousTaifexNightClose $raw.taifexNightClose } | Out-Null
 $raw | Add-Member -MemberType NoteProperty -Name "institutionalNet" -Value (Invoke-Safe "三大法人買賣超" { Get-InstitutionalNet $raw.daily }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "exDividend" -Value (Invoke-Safe "除權息預告" { Get-ExDividend }) -Force
 $raw | Add-Member -MemberType NoteProperty -Name "optionsMarket" -Value (Invoke-Safe "選擇權未平倉" { Get-OptionsMarket }) -Force

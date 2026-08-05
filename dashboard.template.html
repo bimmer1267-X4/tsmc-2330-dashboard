@@ -149,7 +149,7 @@
 
 <div class="card" id="open-prediction-card">
   <div style="font-weight:600; margin-bottom:2px;">盤前股價預測 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
-  <div class="sub">依近1年「ADR隔夜漲跌% + ADR溢價率偏離歷史均值 + ADR歷史相近價位類比估計缺口%」三變數迴歸模型，套用今天的ADR變動、溢價狀態與類比估計推估</div>
+  <div class="sub" id="prediction-sub">依近1年「ADR隔夜漲跌% + ADR溢價率偏離歷史均值 + ADR歷史相近價位類比估計缺口%」三變數迴歸模型，套用今天的ADR變動、溢價狀態與類比估計推估</div>
   <div class="header-row">
     <div>
       <div class="hero" id="prediction-price" style="font-size:36px;">--</div>
@@ -471,11 +471,23 @@
 
     const m = pred.model;
     // 雙變數模型(ADR漲跌%+溢價偏離%)有adrChangeCoefB1這個欄位；三變數模型再多帶
-    // analogGapCoefB3(ADR歷史相近價位類比估計缺口%)。如果樣本數不夠(移動平均暖機期、
-    // 類比比對當天剛好找不到)，後端會逐層退回，這裡三種欄位形狀都要能正確顯示，不能
-    // 假設一定是最完整的版本。
+    // analogGapCoefB3(ADR歷史相近價位類比估計缺口%)；四變數模型再多帶txNightChangeCoefB4
+    // (TX夜盤變動%)。如果樣本數不夠(移動平均暖機期、類比比對當天剛好找不到、TX夜盤
+    // 歷史還不夠長)，後端會逐層退回，這裡四種欄位形狀都要能正確顯示，不能假設一定是
+    // 最完整的版本。
     const isV2 = m.adrChangeCoefB1 !== undefined;
     const isV3 = m.analogGapCoefB3 !== undefined;
+    const isV4 = m.txNightChangeCoefB4 !== undefined;
+
+    // 卡片標題下的一行簡述要跟著目前實際採用的模型層級走，不能固定寫死「三變數」——
+    // 四變數模型上線後，這裡固定寫三變數會跟下面modelNote/predMetrics實際顯示的四個
+    // 依據互相矛盾，使用者會覺得資料兜不起來。
+    const subEl = document.getElementById('prediction-sub');
+    if (subEl) {
+      subEl.textContent = isV4
+        ? '依近1年「ADR隔夜漲跌% + ADR溢價率偏離歷史均值 + ADR歷史相近價位類比估計缺口% + TX夜盤變動%」四變數迴歸模型，套用今天的ADR變動、溢價狀態、類比估計與台指期夜盤變動推估'
+        : '依近1年「ADR隔夜漲跌% + ADR溢價率偏離歷史均值 + ADR歷史相近價位類比估計缺口%」三變數迴歸模型，套用今天的ADR變動、溢價狀態與類比估計推估';
+    }
 
     const predMetrics = [
       ['95%信賴區間', fmt(pred.ci95.low,0)+' ~ '+fmt(pred.ci95.high,0)+' 元'],
@@ -486,6 +498,9 @@
     }
     if (isV3 && pred.basisAnalogGapPct != null) {
       predMetrics.push(['依據ADR歷史類比估計', (pred.basisAnalogGapPct>=0?'+':'')+fmt(pred.basisAnalogGapPct,2)+'%']);
+    }
+    if (isV4 && pred.basisTxNightChangePct != null) {
+      predMetrics.push(['依據台指期夜盤變動', (pred.basisTxNightChangePct>=0?'+':'')+fmt(pred.basisTxNightChangePct,2)+'%']);
     }
     predMetrics.push(
       isV2 ? ['模型解釋力 R²／調整後R²', fmt(m.r2,2)+' / '+fmt(m.adjR2,2)] : ['模型解釋力 R²', fmt(m.r2,2)],
@@ -509,8 +524,10 @@
     }
 
     let modelNote;
-    if (isV3) {
-      modelNote = '模型：開盤缺口% = ' + fmt(m.interceptB0,3) + ' + ' + fmt(m.adrChangeCoefB1,3) + ' × ADR漲跌% + ' + fmt(m.premiumDevCoefB2,3) + ' × 溢價偏離% + ' + fmt(m.analogGapCoefB3,3) + ' × ADR歷史類比估計缺口%（複迴歸OLS，殘差標準差 ' + fmt(m.residualStd,2) + '%，假設常態分布估算機率；模型信心指數＝調整後R²）。⚠️ 純統計關係，不構成投資建議，不保證準確，實際開盤仍以台股交易所公告為準。';
+    if (isV4) {
+      modelNote = '模型：開盤缺口% = ' + fmt(m.interceptB0,3) + ' + ' + fmt(m.adrChangeCoefB1,3) + ' × ADR漲跌% + ' + fmt(m.premiumDevCoefB2,3) + ' × 溢價偏離% + ' + fmt(m.analogGapCoefB3,3) + ' × ADR歷史類比估計缺口% + ' + fmt(m.txNightChangeCoefB4,3) + ' × TX夜盤變動%（複迴歸OLS，殘差標準差 ' + fmt(m.residualStd,2) + '%，假設常態分布估算機率；模型信心指數＝調整後R²）。⚠️ 純統計關係，不構成投資建議，不保證準確，實際開盤仍以台股交易所公告為準。';
+    } else if (isV3) {
+      modelNote = '模型：開盤缺口% = ' + fmt(m.interceptB0,3) + ' + ' + fmt(m.adrChangeCoefB1,3) + ' × ADR漲跌% + ' + fmt(m.premiumDevCoefB2,3) + ' × 溢價偏離% + ' + fmt(m.analogGapCoefB3,3) + ' × ADR歷史類比估計缺口%（複迴歸OLS，殘差標準差 ' + fmt(m.residualStd,2) + '%，假設常態分布估算機率；TX夜盤歷史樣本數尚不足或今日夜盤資料未到，暫以三變數模型計算；模型信心指數＝調整後R²）。⚠️ 純統計關係，不構成投資建議，不保證準確，實際開盤仍以台股交易所公告為準。';
     } else if (isV2) {
       modelNote = '模型：開盤缺口% = ' + fmt(m.interceptB0,3) + ' + ' + fmt(m.adrChangeCoefB1,3) + ' × ADR漲跌% + ' + fmt(m.premiumDevCoefB2,3) + ' × 溢價偏離%（複迴歸OLS，殘差標準差 ' + fmt(m.residualStd,2) + '%，假設常態分布估算機率；ADR歷史類比估計樣本數尚不足，暫以雙變數模型計算；模型信心指數＝調整後R²）。⚠️ 純統計關係，不構成投資建議，不保證準確，實際開盤仍以台股交易所公告為準。';
     } else {

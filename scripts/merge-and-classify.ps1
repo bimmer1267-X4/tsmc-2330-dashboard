@@ -37,9 +37,11 @@ $RegressionWindowMonths = 12
 $MinRegressionSamples = 20
 $MinRegressionSamplesV2 = 60
 $MinRegressionSamplesV3 = 80
+$MinRegressionSamplesV4 = 80
 $PremiumRollWindowDays = 60
 $PremiumHistoryPath = Join-Path $PSScriptRoot "..\data\adr-premium-history.json"
 $PredictionHistoryPath = Join-Path $PSScriptRoot "..\data\prediction-accuracy-history.json"
+$TxNightHistoryPath = Join-Path $PSScriptRoot "..\data\taifex-night-history.json"
 # 開盤價預測準確度追蹤：統計區間樣本數低於這個門檻就不顯示；前端折線圖只取最近這麼多筆
 # 已解析的紀錄(有界)；資料庫是空檔案時，用最近這麼多個歷史訓練配對回溯種一批初始樣本。
 $MinAccuracySamples = 10
@@ -378,6 +380,7 @@ function New-PredictionHistoryEntry($OpenPrediction, [int]$ModelTier, [string]$P
         basisAdrChangePct = $OpenPrediction.basisAdrChangePct
         basisPremiumDevPct = $OpenPrediction.basisPremiumDevPct
         basisAnalogGapPct = $OpenPrediction.basisAnalogGapPct
+        basisTxNightChangePct = $OpenPrediction.basisTxNightChangePct
         basisPrevClose = $OpenPrediction.basisPrevClose
         residualStd = $m.residualStd
         confidenceIndexPct = $m.confidenceIndexPct
@@ -391,6 +394,9 @@ function New-PredictionHistoryEntry($OpenPrediction, [int]$ModelTier, [string]$P
 # 算出「如果那天用這個(已經擬合好的)模型會預測出的開盤缺口%」——只給「種子回溯」使用，
 # 邏輯跟main()裡即時預測套用係數的算法完全一致，只是輸入換成歷史配對而不是「今天」的值。
 function Get-PredictedGapPctForTier($Pair, [int]$ModelTier, $Model) {
+    if ($ModelTier -eq 4) {
+        return $Model.beta[0] + $Model.beta[1] * $Pair.adrChangePct + $Model.beta[2] * $Pair.premiumDev + $Model.beta[3] * $Pair.analogGapPct + $Model.beta[4] * $Pair.txNightChangePct
+    }
     if ($ModelTier -eq 3) {
         return $Model.beta[0] + $Model.beta[1] * $Pair.adrChangePct + $Model.beta[2] * $Pair.premiumDev + $Model.beta[3] * $Pair.analogGapPct
     }
@@ -476,6 +482,7 @@ function New-PredictionHistorySeeds($History, $ModelPairs, [int]$ModelTier, $Mod
             basisAdrChangePct = [math]::Round($pair.adrChangePct, 2)
             basisPremiumDevPct = if ($ModelTier -ge 2) { [math]::Round($pair.premiumDev, 2) } else { $null }
             basisAnalogGapPct = if ($ModelTier -ge 3) { [math]::Round($pair.analogGapPct, 2) } else { $null }
+            basisTxNightChangePct = if ($ModelTier -ge 4) { [math]::Round($pair.txNightChangePct, 2) } else { $null }
             basisPrevClose = $pair.prevClose
             residualStd = [math]::Round($Model.residualStd, 4)
             confidenceIndexPct = $confidenceIndexPct
@@ -890,6 +897,84 @@ function Get-OpenGapModelV3($adrSeries, $fxSeries, $twDaily, $PremiumHistory, [i
     }
 }
 
+# 四變數版本：V3再加一項「台指期(TX)夜盤收盤變動%」。TX夜盤(15:00~次日05:00)結算併入
+# 次一般交易時段(見fetch-market-context.ps1的Get-TaifexNightClose註解)，所以「夜盤日期
+# D」代表的是D當天15:00開始、D+1 05:00收盤的那一場，跟ADR一樣屬於「隔夜到隔天開盤前
+# 才知道結果」的輸入，用同一套「找第一個date>D的twDaily」對齊法(不是同一天，是D+1)。
+# TxNightHistory: [{date, close, changePct}]（date=TAIFEX官方夜盤標示的起始日D，
+# changePct=這場夜盤收盤 vs 前一個交易日夜盤收盤的漲跌%，來源見Get-TaifexNightClose/
+# fetch-live-quote.ps1的校正邏輯，兩者定義一致，可以直接沿用不用重算）。
+function Get-OpenGapModelV4($adrSeries, $fxSeries, $twDaily, $PremiumHistory, $TxNightHistory, [int]$RollWindowDays) {
+    $adrMap = @{}; foreach ($s in $adrSeries) { $adrMap[$s.date] = $s.close }
+    $adrDates = @($adrSeries | ForEach-Object { $_.date })
+    $fxMap = @{}; foreach ($s in $fxSeries) { $fxMap[$s.date] = $s.close }
+    $fxDates = @($fxSeries | ForEach-Object { $_.date } | Sort-Object)
+
+    $premiumSorted = @($PremiumHistory | Sort-Object date)
+    $premiumByDate = @{}; foreach ($h in $premiumSorted) { $premiumByDate[$h.date] = $h.premiumPct }
+    $premiumIndexByDate = @{}
+    for ($i = 0; $i -lt $premiumSorted.Count; $i++) { $premiumIndexByDate[$premiumSorted[$i].date] = $i }
+    $txNightMap = @{}; if ($TxNightHistory) { foreach ($h in $TxNightHistory) { $txNightMap[$h.date] = $h.changePct } }
+
+    $pairsByTwDate = @{}
+    for ($i = 1; $i -lt $adrDates.Count; $i++) {
+        $D = $adrDates[$i]; $Dprev = $adrDates[$i - 1]
+        $adrClose = $adrMap[$D]; $adrClosePrev = $adrMap[$Dprev]
+        $adrChangePct = ($adrClose / $adrClosePrev - 1) * 100
+
+        $fx = Find-NearestOnOrBefore $fxMap $fxDates $D
+        if ($null -eq $fx) { continue }
+
+        $tIdx = -1
+        for ($j = 0; $j -lt $twDaily.Count; $j++) {
+            if ($twDaily[$j].date -gt $D) { $tIdx = $j; break }
+        }
+        if ($tIdx -le 0) { continue }
+        $T = $twDaily[$tIdx]; $Tprev = $twDaily[$tIdx - 1]
+        $twOpenGapPct = ($T.open / $Tprev.close - 1) * 100
+
+        if (-not $premiumIndexByDate.ContainsKey($Tprev.date)) { continue }
+        $pIdx = $premiumIndexByDate[$Tprev.date]
+        $windowStart = [math]::Max(0, $pIdx - $RollWindowDays + 1)
+        $window = @($premiumSorted[$windowStart..$pIdx] | ForEach-Object { $_.premiumPct })
+        if ($window.Count -lt [math]::Min($RollWindowDays, 20)) { continue }
+        $rollMean = Get-Mean $window
+        $premiumDev = $premiumByDate[$Tprev.date] - $rollMean
+
+        $adrTrunc = @($adrSeries | Where-Object { $_.date -le $D })
+        $fxTrunc = @($fxSeries | Where-Object { $_.date -le $D })
+        $twTrunc = @($twDaily | Where-Object { $_.date -lt $T.date })
+        $analog = Get-AnalogMatches $adrClose $adrTrunc $fxTrunc $twTrunc
+        if ($null -eq $analog) { continue }
+        $analogGapPct = ($analog.avgTwOpen / $Tprev.close - 1) * 100
+
+        # TX夜盤配對用同一個ADR日期D去找對應的夜盤日期D這一場(同一個「隔夜」概念)——D這天
+        # 15:00開始的夜盤，跟D這天美股ADR是同一個交易日晚上發生的兩件事，理論上都在T(D+1)
+        # 開盤前就已知，配對邏輯上跟ADR共用同一個D。
+        if (-not $txNightMap.ContainsKey($D)) { continue }
+        $txNightChangePct = $txNightMap[$D]
+
+        $pairsByTwDate[$T.date] = [PSCustomObject]@{ adrDate = $D; adrClose = $adrClose; adrChangePct = $adrChangePct; premiumDev = $premiumDev; analogGapPct = $analogGapPct; txNightChangePct = $txNightChangePct; twOpenGapPct = $twOpenGapPct; prevClose = $Tprev.close; actualOpen = $T.open; actualClose = $T.close }
+    }
+
+    $uniq = @($pairsByTwDate.Values)
+    if ($uniq.Count -lt $MinRegressionSamplesV4) { return $null }
+
+    $X = @($uniq | ForEach-Object { , @(1.0, $_.adrChangePct, $_.premiumDev, $_.analogGapPct, $_.txNightChangePct) })
+    $y = @($uniq | ForEach-Object { $_.twOpenGapPct })
+    $reg = Get-OlsRegressionN $X $y
+    $residuals = @($uniq | ForEach-Object { $_.twOpenGapPct - ($reg.beta[0] + $reg.beta[1] * $_.adrChangePct + $reg.beta[2] * $_.premiumDev + $reg.beta[3] * $_.analogGapPct + $reg.beta[4] * $_.txNightChangePct) })
+    $residualStd = Get-StdDev $residuals
+    $hitCount = @($uniq | Where-Object { [math]::Sign($_.adrChangePct) -eq [math]::Sign($_.twOpenGapPct) -and $_.adrChangePct -ne 0 }).Count
+    $hitRate = $hitCount / $uniq.Count
+
+    $pairsSorted = @($uniq | Sort-Object twDate)
+    return [PSCustomObject]@{
+        beta = $reg.beta; se = $reg.se; t = $reg.t; p = $reg.p; r2 = $reg.r2; adjR2 = $reg.adjR2; n = $reg.n
+        residualStd = $residualStd; hitRate = $hitRate; pairs = $pairsSorted
+    }
+}
+
 # 收盤後回填模式(-BackfillOnly)：台股收盤後(13:35)立刻用當天剛收盤的台股日K，回填
 # 「盤前股價預測準確度歷史追蹤」卡片裡今天早上那筆還沒解析的預測(actual補上開盤/收盤/
 # 誤差/走勢命中/CI覆蓋率/Brier分數)，讓卡片不用等到隔天06:00的完整排程才更新。刻意不
@@ -985,6 +1070,15 @@ try {
 }
 
 $premiumHistory = Update-AdrPremiumHistory $twDaily1y $adrDaily $fxDaily $AdrRatio
+
+# 台指期(TX)夜盤歷史序列：純讀取，累積寫入交給fetch-market-context.ps1的
+# Get-TaifexNightClose（偵測到換日、前一筆確定不會再被校正時才append），這裡不寫檔。
+$txNightHistory = @()
+try {
+    $txNightHistory = Get-Content $TxNightHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+} catch {
+    # 檔案不存在或格式壞掉，視為空歷史——四變數模型樣本數不足時會自動退回三變數版本
+}
 
 $impliedTwd = [math]::Round(($AdrPrice / $AdrRatio) * $UsdTwd, 2)
 $premiumPct = [math]::Round((($impliedTwd - $d.valuation.closePrice) / $d.valuation.closePrice) * 100, 2)
@@ -1104,16 +1198,74 @@ if (Test-Path $configPath) {
 }
 
 # ---- 台股開盤價機率預估 ----
-# 三層退回：優先用三變數模型(ADR漲跌% + 溢價偏離% + ADR歷史相近價位類比估計缺口%)；
-# 樣本數不足(MinRegressionSamplesV3)或今天剛好找不到任何類比比對時，退回只帶溢價偏離的
-# 雙變數模型；溢價歷史也不夠長的話再退回僅ADR漲跌%的單變數模型。不管哪一層都不讓卡片
-# 直接消失——這些退回路徑理論上只有在資料還在累積的最初期間才會用到，1年回填後樣本數
-# 已經足夠，正常情況下應該都會走三變數模型。
+# 四層退回：優先用四變數模型(ADR漲跌% + 溢價偏離% + ADR歷史相近價位類比估計缺口% +
+# TX夜盤變動%)；TX夜盤歷史樣本數不足(MinRegressionSamplesV4)、或今天的$d.taifexNightClose
+# 剛好還沒有值時，退回三變數模型；樣本數不足(MinRegressionSamplesV3)或今天剛好找不到
+# 任何類比比對時，再退回只帶溢價偏離的雙變數模型；溢價歷史也不夠長的話最後退回僅ADR
+# 漲跌%的單變數模型。不管哪一層都不讓卡片直接消失——這些退回路徑理論上只有在資料還在
+# 累積的最初期間才會用到，1年回填後樣本數已經足夠，正常情況下應該都會走四變數模型。
 $openPrediction = $null
 $predicted = $false
 $predictionTier = $null
 $predictionModel = $null
 if ($adrDaily -and $fxDaily) {
+    try {
+        $model4 = if ($twDaily1y.Count -gt 0) { Get-OpenGapModelV4 $adrDaily.series $fxDaily.series $twDaily1y $premiumHistory $txNightHistory $PremiumRollWindowDays } else { $null }
+        $txNightChangePctNow = if ($d.taifexNightClose) { $d.taifexNightClose.changePct } else { $null }
+        # 「今天」的類比估計缺口%要用跟訓練時同一套函式(Get-AnalogMatches)、同一份完整
+        # 1年序列現算，這樣訓練特徵跟預測當下用的特徵才是同一種算法，不會兩邊邏輯不一致。
+        $analogNow4 = if ($model4) { Get-AnalogMatches $AdrPrice $adrDaily.series $fxDaily.series $twDaily1y } else { $null }
+
+        if ($model4 -and $analogNow4 -and $null -ne $txNightChangePctNow) {
+            $premiumSorted4 = @($premiumHistory | Sort-Object date)
+            $latestPremium4 = $premiumSorted4[-1]
+            $rollStart4 = [math]::Max(0, $premiumSorted4.Count - $PremiumRollWindowDays)
+            $rollWindow4 = @($premiumSorted4[$rollStart4..($premiumSorted4.Count - 1)] | ForEach-Object { $_.premiumPct })
+            $premiumDevNow4 = $latestPremium4.premiumPct - (Get-Mean $rollWindow4)
+            $base4 = $d.valuation.closePrice
+            $analogGapNowPct4 = ($analogNow4.avgTwOpen / $base4 - 1) * 100
+
+            $b0 = $model4.beta[0]; $b1 = $model4.beta[1]; $b2 = $model4.beta[2]; $b3 = $model4.beta[3]; $b4 = $model4.beta[4]
+            $predictedGapPct = $b0 + $b1 * $AdrChangePct + $b2 * $premiumDevNow4 + $b3 * $analogGapNowPct4 + $b4 * $txNightChangePctNow
+            $priceAt = { param($gapPct) [math]::Round($base4 * (1 + $gapPct / 100), 2) }
+            $probUpPct = [math]::Round((Get-NormalCdf ($predictedGapPct / $model4.residualStd)) * 100, 1)
+            $confidenceIndexPct = [math]::Round(([math]::Max(0, $model4.adjR2)) * 100, 1)
+
+            $openPrediction = [PSCustomObject]@{
+                predictedGapPct = [math]::Round($predictedGapPct, 2)
+                predictedOpen   = (& $priceAt $predictedGapPct)
+                ci68            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $model4.residualStd)); high = (& $priceAt ($predictedGapPct + $model4.residualStd)) }
+                ci95            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - 1.96 * $model4.residualStd)); high = (& $priceAt ($predictedGapPct + 1.96 * $model4.residualStd)) }
+                probUpPct       = $probUpPct
+                basisAdrChangePct = $AdrChangePct
+                basisPremiumDevPct = [math]::Round($premiumDevNow4, 2)
+                basisAnalogGapPct = [math]::Round($analogGapNowPct4, 2)
+                basisTxNightChangePct = $txNightChangePctNow
+                basisPrevClose  = $base4
+                model           = [PSCustomObject]@{
+                    method = "OLS四變數迴歸（開盤缺口% ~ ADR漲跌% + 溢價偏離% + ADR歷史相近價位類比估計缺口% + TX夜盤變動%）"
+                    interceptB0 = [math]::Round($b0, 4); adrChangeCoefB1 = [math]::Round($b1, 4); premiumDevCoefB2 = [math]::Round($b2, 4); analogGapCoefB3 = [math]::Round($b3, 4); txNightChangeCoefB4 = [math]::Round($b4, 4)
+                    r2 = [math]::Round($model4.r2, 4); adjR2 = [math]::Round($model4.adjR2, 4)
+                    tAdrChange = [math]::Round($model4.t[1], 2); tPremiumDev = [math]::Round($model4.t[2], 2); tAnalogGap = [math]::Round($model4.t[3], 2); tTxNightChange = [math]::Round($model4.t[4], 2)
+                    pAdrChange = [math]::Round($model4.p[1], 4); pPremiumDev = [math]::Round($model4.p[2], 4); pAnalogGap = [math]::Round($model4.p[3], 4); pTxNightChange = [math]::Round($model4.p[4], 4)
+                    residualStd = [math]::Round($model4.residualStd, 4); hitRatePct = [math]::Round($model4.hitRate * 100, 1)
+                    sampleSize = $model4.n; windowMonths = $RegressionWindowMonths; premiumRollWindowDays = $PremiumRollWindowDays
+                    analogTolerancePct = $analogNow4.tolerancePct
+                    confidenceIndexPct = $confidenceIndexPct
+                }
+            }
+            $d | Add-Member -NotePropertyName openPrediction -NotePropertyValue $openPrediction -Force
+            $predicted = $true
+            $predictionTier = 4
+            $predictionModel = $model4
+            Write-Host "開盤價機率預估(四變數): 缺口$($openPrediction.predictedGapPct)%  預估開盤價$($openPrediction.predictedOpen)  上漲機率$($probUpPct)%（調整後R²=$([math]::Round($model4.adjR2,3)), n=$($model4.n), TX夜盤變動t值=$([math]::Round($model4.t[4],2))）"
+        }
+    } catch {
+        Write-Warning "四變數開盤價機率預估計算失敗，將嘗試三變數版本: $($_.Exception.Message)"
+    }
+}
+
+if ((-not $predicted) -and $adrDaily -and $fxDaily) {
     $twForModel = if ($twDaily1y.Count -gt 0) { $twDaily1y } else { $d.daily }
 
     try {

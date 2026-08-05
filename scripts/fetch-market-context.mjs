@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = join(__dirname, "..", "data", "data.json");
+const TX_NIGHT_HISTORY_PATH = join(__dirname, "..", "data", "taifex-night-history.json");
 const STOCK_NO = "2330";
 const UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
 
@@ -266,6 +267,30 @@ function classifyChipTrend(raw) {
   return { verdict, cls, reasons, risk };
 }
 
+// 台指期(TX)夜盤歷史序列：永久保留、逐日累積（跟merge-and-classify.mjs的
+// updateAdrPremiumHistory同一套read-try/catch→Map upsert-by-date→sort→write模式），
+// 供「開盤價機率預估」四變數模型(buildOpenGapModelV4)訓練用。這裡只在「換日」那一刻
+// (previous.date !== raw.taifexNightClose.date)才把previous這筆append進去——因為
+// previous換日後就確定不會再被fetchTaifexNightClose的校正邏輯改動了(校正只發生在
+// 「同一個date」的情況)，此時才是它真正定案、可以永久寫入的時間點；raw.taifexNightClose
+// 目前這筆(還在今天)則留給明天換日時才寫入，不提前寫，避免把還可能被SettlementPrice
+// 校正的暫定值寫死進歷史。
+async function appendTaifexNightHistory(previous, current) {
+  if (!previous || previous.close == null || previous.date == null) return;
+  if (!current || current.date == null || current.date === previous.date) return;
+  let history = [];
+  try {
+    history = JSON.parse(await readFile(TX_NIGHT_HISTORY_PATH, "utf8"));
+  } catch {
+    // 檔案不存在或格式壞掉，視為空歷史，從頭建立
+  }
+  const byDate = new Map(history.map((h) => [h.date, h]));
+  byDate.set(previous.date, { date: previous.date, close: previous.close, changePct: previous.changePct ?? null });
+  const merged = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  await writeFile(TX_NIGHT_HISTORY_PATH, JSON.stringify(merged), "utf8");
+  console.log(`已更新台指期夜盤歷史紀錄: ${TX_NIGHT_HISTORY_PATH}（累計 ${merged.length} 筆，新增/更新 ${previous.date}）`);
+}
+
 async function safe(label, fn) {
   try {
     return await fn();
@@ -283,6 +308,7 @@ async function main() {
   raw.taiexIndex = await safe("TAIEX指數", () => fetchYahooIndex("^TWII"));
   const previousTaifexNightClose = raw.taifexNightClose;
   raw.taifexNightClose = await safe("台指期夜盤收盤", () => fetchTaifexNightClose(previousTaifexNightClose));
+  await safe("台指期夜盤歷史紀錄累積", () => appendTaifexNightHistory(previousTaifexNightClose, raw.taifexNightClose));
   raw.institutionalNet = await safe("三大法人買賣超", () => fetchInstitutionalNet(raw.daily));
   raw.exDividend = await safe("除權息預告", fetchExDividend);
   raw.optionsMarket = await safe("選擇權未平倉", fetchOptionsMarket);

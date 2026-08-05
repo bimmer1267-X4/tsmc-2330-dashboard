@@ -28,11 +28,14 @@ jobs:
       - name: Fetch TWSE daily data + technical indicators
         run: node scripts/update-dashboard.mjs
 
-      - name: Merge ADR/FX + classify valuation zone
-        run: node scripts/merge-and-classify.mjs
-
+      # 這個step要排在merge-and-classify.mjs之前：merge-and-classify.mjs的開盤價機率預估
+      # 四變數模型要用「今天」的d.taifexNightClose(TX夜盤變動%)當即時輸入，這裡先跑完
+      # 才能確保讀到的是今天剛更新的值，不是還沒更新的昨天舊值。
       - name: Fetch margin trading / SOX+TAIEX / ex-dividend / options open interest
         run: node scripts/fetch-market-context.mjs
+
+      - name: Merge ADR/FX + classify valuation zone
+        run: node scripts/merge-and-classify.mjs
 
       - name: Build dashboard.html
         run: node scripts/build.mjs
@@ -41,7 +44,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/data.json data/adr-premium-history.json data/prediction-accuracy-history.json dashboard.html index.html
+          git add data/data.json data/adr-premium-history.json data/prediction-accuracy-history.json data/taifex-night-history.json dashboard.html index.html
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
