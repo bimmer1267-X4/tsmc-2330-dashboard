@@ -265,8 +265,11 @@ $resultHash.indicators  = $indicators
 $resultHash.valuation   = $valuation
 $resultHash.epsInfo     = $epsInfo
 $resultHash.latestRsi   = $latestRsi
-$resultHash.adr         = $null   # 由 Claude 於合併步驟填入 (stockanalysis.com + Yahoo Finance 交叉比對)
-$resultHash.fxRate      = $null   # 由 Claude 於合併步驟填入 (央行/Yahoo 交叉比對)
+# adr/fxRate不在這裡重置成$null——原本假設merge-and-classify.mjs一定會緊接著完整模式
+# 重新填入，但鎖定時間窗內的手動觸發改用--backfill-only模式，完全不會碰這兩個欄位，
+# 若這裡先歸零，會讓它們就這樣停在$null，把依賴raw.adr.price/raw.fxRate.usdTwd的
+# 前端渲染整個炸掉。不主動設定，讓上面$resultHash從$Previous疊過來的值繼續留著，
+# 等merge-and-classify.mjs真的跑完整模式時才會被覆蓋成新值。
 $result = [PSCustomObject]$resultHash
 
 $result | ConvertTo-Json -Depth 6 -Compress | Out-File -FilePath $DataPath -Encoding utf8

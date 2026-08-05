@@ -34,8 +34,26 @@ jobs:
       - name: Fetch margin trading / SOX+TAIEX / ex-dividend / options open interest
         run: node scripts/fetch-market-context.mjs
 
+      # 「盤前股價預測」「ADR歷史相近價位類比估計」這兩張卡片的意義是「用隔夜資訊，預測
+      # 當天開盤缺口」，06:00排程跑完之後當天的預測就該定案，不該因為使用者手動補跑
+      # renew-2330（例如排程失敗、想手動補跑）而再變動——重算用的訓練樣本、即時ADR/匯率
+      # 報價都會因為時間點不同而有微幅差異，導致「已經發生過的當天開盤」的預測數字看起來
+      # 莫名其妙地變動，容易讓人誤會。
+      #
+      # 只限制手動觸發(workflow_dispatch)，排程本身(schedule)永遠跑完整模式——06:00排程
+      # 就是唯一真正該重算這兩張卡片的時間點，不受這個時間窗限制。鎖定時間窗訂在當天13:30
+      # (台股收盤)～隔日08:00(06:00排程理論上已經跑完)：這段期間內手動觸發，改用已經存在
+      # 的--backfill-only模式(post-close-update.yml本來就在用)，只回填收盤價相關資料跟
+      # 準確度追蹤，完全不碰d.openPrediction/d.adrAnalogMatches。
       - name: Merge ADR/FX + classify valuation zone
-        run: node scripts/merge-and-classify.mjs
+        run: |
+          HOURMIN=$((10#$(TZ=Asia/Taipei date +%H%M)))
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && { [ "$HOURMIN" -ge 1330 ] || [ "$HOURMIN" -lt 800 ]; }; then
+            echo "手動觸發且落在鎖定時間窗(13:30~隔日08:00)內，只回填收盤價相關資料，不重算盤前預測/ADR類比估計"
+            node scripts/merge-and-classify.mjs --backfill-only
+          else
+            node scripts/merge-and-classify.mjs
+          fi
 
       - name: Build dashboard.html
         run: node scripts/build.mjs

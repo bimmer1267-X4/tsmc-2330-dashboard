@@ -1074,6 +1074,11 @@ async function main() {
 
   const d = JSON.parse(await readFile(DATA_PATH, "utf8"));
 
+  // d.generatedAt(update-dashboard.mjs寫入，這次pipeline開始執行的UTC時間)換算成台北
+  // 日曆日期字串，供openPrediction/adrAnalogMatches標記「這是哪一天算出來的」(forDate)。
+  // 提早在這裡算好，這樣四層退回模型跟類比估計兩處都能直接用同一個值，不用各自重算。
+  const todayDateStr = new Date(new Date(d.generatedAt).getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+
   d.adr = {
     price: adrPrice,
     changePct: adrChangePct,
@@ -1240,6 +1245,7 @@ async function main() {
         const confidenceIndexPct = round(Math.max(0, model4.adjR2) * 100, 1);
 
         d.openPrediction = {
+          forDate: todayDateStr,
           predictedGapPct: round(predictedGapPct, 2),
           predictedOpen: priceAt(predictedGapPct),
           ci68: { low: priceAt(predictedGapPct - model4.residualStd), high: priceAt(predictedGapPct + model4.residualStd) },
@@ -1310,6 +1316,7 @@ async function main() {
         const confidenceIndexPct = round(Math.max(0, model3.adjR2) * 100, 1);
 
         d.openPrediction = {
+          forDate: todayDateStr,
           predictedGapPct: round(predictedGapPct, 2),
           predictedOpen: priceAt(predictedGapPct),
           ci68: { low: priceAt(predictedGapPct - model3.residualStd), high: priceAt(predictedGapPct + model3.residualStd) },
@@ -1370,6 +1377,7 @@ async function main() {
           const confidenceIndexPct = round(Math.max(0, model2.adjR2) * 100, 1);
 
           d.openPrediction = {
+            forDate: todayDateStr,
             predictedGapPct: round(predictedGapPct, 2),
             predictedOpen: priceAt(predictedGapPct),
             ci68: { low: priceAt(predictedGapPct - model2.residualStd), high: priceAt(predictedGapPct + model2.residualStd) },
@@ -1417,6 +1425,7 @@ async function main() {
           const probUpPct = round(normalCdf(predictedGapPct / model.residualStd) * 100, 1);
 
           d.openPrediction = {
+            forDate: todayDateStr,
             predictedGapPct: round(predictedGapPct, 2),
             predictedOpen: priceAt(predictedGapPct),
             ci68: { low: priceAt(predictedGapPct - model.residualStd), high: priceAt(predictedGapPct + model.residualStd) },
@@ -1458,6 +1467,7 @@ async function main() {
       const analog = findAnalogMatches(adrPrice, adrDaily6mo.series, fxDaily6mo.series, d.daily);
       if (analog) {
         analog.avgTwOpenAdjusted = adjustAvgTwOpenToFx(analog.matches, d.fxRate.usdTwd);
+        analog.forDate = todayDateStr;
         d.adrAnalogMatches = analog;
         console.log(`歷史相近ADR價位比對: ${analog.count}筆 (±${analog.tolerancePct}%)  平均對應台股開盤價: ${analog.avgTwOpen}（匯率調整後: ${analog.avgTwOpenAdjusted}）`);
       } else {
@@ -1488,9 +1498,8 @@ async function main() {
         ? seedPredictionHistoryIfEmpty(history, predictionModel.pairs, predictionTier, predictionModel, adrDaily.series, fxDaily.series, twDaily1y)
         : [];
 
-      const predictedDateStr = new Date(new Date(d.generatedAt).getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
       const newEntry = predicted
-        ? buildPredictionHistoryEntry(d.openPrediction, predictionTier, predictedDateStr, d.generatedAt, false, d.adrAnalogMatches)
+        ? buildPredictionHistoryEntry(d.openPrediction, predictionTier, todayDateStr, d.generatedAt, false, d.adrAnalogMatches)
         : null;
 
       // 種子樣本直接寫進同一份歷史（在updatePredictionAccuracyHistory做回填/upsert之前），

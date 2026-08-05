@@ -281,6 +281,12 @@ async function main() {
   const epsInfo = await fetchEpsInfo(previous.epsInfo ?? null);
   const { indicators, latestRsi } = computeIndicators(daily);
 
+  // adr/fxRate不在這裡重置成null——原本假設merge-and-classify.mjs一定會緊接著完整模式
+  // 重新填入，但鎖定時間窗內的手動觸發改用--backfill-only模式，完全不會碰這兩個欄位，
+  // 若這裡先歸零，會讓它們就這樣停在null，把依賴raw.adr.price/raw.fxRate.usdTwd的
+  // 前端渲染整個炸掉(連帶後面的卡片都不會顯示)。改成跟epsInfo一樣的做法：不主動重置，
+  // 讓...previous帶著上一次算好的值過來，等merge-and-classify.mjs真的跑完整模式時
+  // 才會被覆蓋成新值；--backfill-only模式下就維持上一次的值，不會變成null。
   const result = {
     ...previous,
     generatedAt: new Date().toISOString(),
@@ -290,8 +296,6 @@ async function main() {
     valuation,
     epsInfo,
     latestRsi,
-    adr: null,
-    fxRate: null,
   };
 
   await writeFile(DATA_PATH, JSON.stringify(result), "utf8");

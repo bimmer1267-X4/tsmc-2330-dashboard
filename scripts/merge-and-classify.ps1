@@ -1035,6 +1035,14 @@ if (-not $AdrPrice -or -not $AdrQuoteTime -or -not $UsdTwd -or -not $FxQuoteTime
 $path = Join-Path $PSScriptRoot "..\data\data.json"
 $d = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json
 
+# $d.generatedAt(update-dashboard.mjs寫入，這次pipeline開始執行的UTC時間)換算成台北
+# 日曆日期字串，供openPrediction/adrAnalogMatches標記「這是哪一天算出來的」(forDate)。
+# 提早在這裡算好，這樣四層退回模型跟類比估計兩處都能直接用同一個值，不用各自重算。
+# 用DateTimeOffset::Parse明確解析ISO時間字串裡的時區資訊(而不是Get-Date隱含依賴系統
+# 當地文化/時區設定)，確保不論執行環境的系統時區為何，都能正確換算成UTC後+8小時得到
+# 台北日期，行為跟.mjs版本(new Date(...).getTime() + 8*3600*1000)一致。
+$todayDateStr = ([datetimeoffset]::Parse($d.generatedAt)).UtcDateTime.AddHours(8).ToString("yyyy-MM-dd")
+
 $d.adr = [PSCustomObject]@{
     price     = $AdrPrice
     changePct = $AdrChangePct
@@ -1237,6 +1245,7 @@ if ($adrDaily -and $fxDaily) {
             $confidenceIndexPct = [math]::Round(([math]::Max(0, $model4.adjR2)) * 100, 1)
 
             $openPrediction = [PSCustomObject]@{
+                forDate = $todayDateStr
                 predictedGapPct = [math]::Round($predictedGapPct, 2)
                 predictedOpen   = (& $priceAt $predictedGapPct)
                 ci68            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $model4.residualStd)); high = (& $priceAt ($predictedGapPct + $model4.residualStd)) }
@@ -1295,6 +1304,7 @@ if ((-not $predicted) -and $adrDaily -and $fxDaily) {
             $confidenceIndexPct = [math]::Round(([math]::Max(0, $model3.adjR2)) * 100, 1)
 
             $openPrediction = [PSCustomObject]@{
+                forDate = $todayDateStr
                 predictedGapPct = [math]::Round($predictedGapPct, 2)
                 predictedOpen   = (& $priceAt $predictedGapPct)
                 ci68            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $model3.residualStd)); high = (& $priceAt ($predictedGapPct + $model3.residualStd)) }
@@ -1344,6 +1354,7 @@ if ((-not $predicted) -and $adrDaily -and $fxDaily) {
                 $confidenceIndexPct = [math]::Round(([math]::Max(0, $model2.adjR2)) * 100, 1)
 
                 $openPrediction = [PSCustomObject]@{
+                    forDate = $todayDateStr
                     predictedGapPct = [math]::Round($predictedGapPct, 2)
                     predictedOpen   = (& $priceAt $predictedGapPct)
                     ci68            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $model2.residualStd)); high = (& $priceAt ($predictedGapPct + $model2.residualStd)) }
@@ -1384,6 +1395,7 @@ if ((-not $predicted) -and $adrDaily -and $fxDaily) {
                 $probUpPct = [math]::Round((Get-NormalCdf ($predictedGapPct / $model.residualStd)) * 100, 1)
 
                 $openPrediction = [PSCustomObject]@{
+                    forDate = $todayDateStr
                     predictedGapPct = [math]::Round($predictedGapPct, 2)
                     predictedOpen   = (& $priceAt $predictedGapPct)
                     ci68            = [PSCustomObject]@{ low = (& $priceAt ($predictedGapPct - $model.residualStd)); high = (& $priceAt ($predictedGapPct + $model.residualStd)) }
@@ -1423,6 +1435,7 @@ if ($adrDaily6mo -and $fxDaily6mo) {
         if ($analog) {
             $avgTwOpenAdjusted = Get-AdjustedAvgTwOpen $analog.matches $UsdTwd
             $analog | Add-Member -NotePropertyName avgTwOpenAdjusted -NotePropertyValue $avgTwOpenAdjusted -Force
+            $analog | Add-Member -NotePropertyName forDate -NotePropertyValue $todayDateStr -Force
             $d | Add-Member -NotePropertyName adrAnalogMatches -NotePropertyValue $analog -Force
             Write-Host "歷史相近ADR價位比對: $($analog.count)筆 (±$($analog.tolerancePct)%)  平均對應台股開盤價: $($analog.avgTwOpen)（匯率調整後: $($analog.avgTwOpenAdjusted)）"
         } else {
@@ -1449,11 +1462,7 @@ if ($twDaily1y.Count -gt 0) {
         }
         $seeds = if ($predictionModel) { New-PredictionHistorySeeds $history $predictionModel.pairs $predictionTier $predictionModel $adrDaily.series $fxDaily.series $twDaily1y } else { @() }
 
-        # 用DateTimeOffset::Parse明確解析ISO時間字串裡的時區資訊(而不是Get-Date隱含依賴
-        # 系統當地文化/時區設定)，確保不論執行環境的系統時區為何，都能正確換算成UTC後
-        # +8小時得到台北日期，行為跟.mjs版本(new Date(...).getTime() + 8*3600*1000)一致。
-        $predictedDateStr = ([datetimeoffset]::Parse($d.generatedAt)).UtcDateTime.AddHours(8).ToString("yyyy-MM-dd")
-        $newEntry = if ($predicted) { New-PredictionHistoryEntry $openPrediction $predictionTier $predictedDateStr $d.generatedAt $false $analog } else { $null }
+        $newEntry = if ($predicted) { New-PredictionHistoryEntry $openPrediction $predictionTier $todayDateStr $d.generatedAt $false $analog } else { $null }
 
         # 種子樣本直接寫進同一份歷史（在Update-PredictionAccuracyHistory做回填/upsert之前），
         # 這樣今天這次執行內，種子樣本也會一併被回填邏輯掃過（雖然種子樣本本來就已經有
