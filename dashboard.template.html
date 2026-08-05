@@ -141,6 +141,8 @@
   </div>
   <div style="font-weight:600; margin:14px 0 6px;">夜盤K線圖（近6個月）</div>
   <div class="chart-wrap"><svg id="chart-taifex-night" width="100%" viewBox="0 0 900 240" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-taifex-night"></div></div>
+  <div style="font-weight:600; margin:14px 0 6px;">成交量</div>
+  <div class="chart-wrap"><svg id="chart-taifex-night-volume" width="100%" viewBox="0 0 900 70" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-taifex-night-volume"></div></div>
 </div>
 
 <div class="card" id="market-context-card">
@@ -828,6 +830,7 @@
       high: h.high ?? h.close,
       low: h.low ?? h.close,
       close: h.close,
+      volume: h.volume ?? 0,
     }));
     const n2 = bars.length;
     const svg2 = document.getElementById('chart-taifex-night');
@@ -890,6 +893,45 @@
       });
     });
     svg2.addEventListener('pointerleave', () => { tooltip2.style.display='none'; crosshair2.setAttribute('visibility','hidden'); });
+
+    // ---- 成交量柱狀圖 ----（種子歷史沒有volume的列，上面bars.map已經用??0補成0，
+    // 這裡不特別處理缺值，柱子就是0高，畫面上等於沒有柱子，不會誤導）
+    const svgVol = document.getElementById('chart-taifex-night-volume');
+    const WV = 900, HV = 70, padTV = 6, padBV = 4;
+    const maxV = Math.max(1, ...bars.map((b) => b.volume));
+    function yVol(v) { return padTV + (HV-padTV-padBV) * (1 - v/maxV); }
+    const barW2 = Math.max(1, (WV-padL2-padR2)/n2*0.7);
+    bars.forEach((b,i) => {
+      const up = b.close >= b.open;
+      svgVol.appendChild(el('rect', {x:x2(i)-barW2/2, y:yVol(b.volume), width:barW2, height:HV-padBV-yVol(b.volume), fill: up?'var(--critical)':'var(--good)', opacity:0.55}));
+    });
+    axisLabel(svgVol, padL2-6, padTV+6, (maxV/1000).toFixed(0)+'K');
+
+    const tooltipVol = document.getElementById('tooltip-taifex-night-volume');
+    const hitRectVol = el('rect', {x:padL2, y:0, width:WV-padL2-padR2, height:HV, fill:'transparent'});
+    svgVol.appendChild(hitRectVol);
+    const crosshairVol = el('line', {x1:0,x2:0,y1:padTV,y2:HV-padBV, stroke:'var(--baseline)', 'stroke-width':1, visibility:'hidden'});
+    svgVol.appendChild(crosshairVol);
+    svgVol.addEventListener('pointermove', (evt) => {
+      const rect = svgVol.getBoundingClientRect();
+      const px = (evt.clientX - rect.left) / rect.width * WV;
+      let i = Math.round((px - padL2) / (WV - padL2 - padR2) * (n2-1));
+      i = Math.max(0, Math.min(n2-1, i));
+      const cx = x2(i);
+      crosshairVol.setAttribute('x1', cx); crosshairVol.setAttribute('x2', cx); crosshairVol.setAttribute('visibility','visible');
+      const b = bars[i];
+      tooltipVol.style.display = 'block';
+      tooltipVol.style.left = Math.min(rect.width-190, Math.max(0,(px/WV)*rect.width+10)) + 'px';
+      tooltipVol.style.top = '10px';
+      tooltipVol.innerHTML = '';
+      const dateEl2 = document.createElement('div'); dateEl2.className='t-date'; dateEl2.textContent = b.date;
+      tooltipVol.appendChild(dateEl2);
+      const row = document.createElement('div'); row.className='t-row';
+      const kEl = document.createElement('span'); kEl.className='k'; kEl.textContent = '成交量';
+      const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = fmt(b.volume,0) + ' 口';
+      row.appendChild(kEl); row.appendChild(vEl); tooltipVol.appendChild(row);
+    });
+    svgVol.addEventListener('pointerleave', () => { tooltipVol.style.display='none'; crosshairVol.setAttribute('visibility','hidden'); });
   })();
 
   // ---- price chart (candlestick + MA + Bollinger) ----
