@@ -499,7 +499,51 @@
     // 大數字改顯示CI68區間(而非單一預測價位)，缺口%那行整個移除——單一價位/單一%數字
     // 拿來評判太武斷，改用區間呈現讓使用者一眼看到「有把握落在這個範圍」。predictedOpen/
     // predictedGapPct兩個原始欄位本身不受影響，「準確度追蹤」卡片跟走勢圖還是照樣使用。
-    document.getElementById('prediction-price').textContent = fmt(pred.ci68.low,0) + ' ~ ' + fmt(pred.ci68.high,0) + ' 元';
+    //
+    // "~"分隔符本身保留不變(使用者要求)，在它正上方疊加一個方向箭頭：用「ADR歷史相近
+    // 價位類比估計」(raw.adrAnalogMatches.avgTwOpenAdjusted，跟adr-analog-card那個
+    // IIFE讀的是同一個後端算好的固定值，兩個IIFE互不依賴執行順序)當基準值，判斷它落在
+    // CI68區間的哪一側：跟區間本身比較(而不是跟區間中點比較)，只有在兩種獨立方法(OLS
+    // 迴歸 vs ADR歷史類比)出現方向性分歧時才顯示箭頭——類比估計落在區間內視為「兩者互相
+    // 印證」，這種情況預期是常態(兩個模型本來就用重疊的輸入資料)，"~"本身就代表「不帶
+    // 箭頭」的中性狀態，上方留空、不额外加符號；只有分歧時才在"~"正上方疊加箭頭指向類比
+    // 估計偏離的方向。顏色比照這個dashboard的台灣股價慣例(漲用--critical紅、跌用--good
+    // 綠，見taifex-night-delta的實作與註解)：類比估計看高於區間(→，偏多方向)用紅，看低於
+    // 區間(←，偏空方向)用綠。
+    const priceEl = document.getElementById('prediction-price');
+    priceEl.textContent = '';
+    priceEl.append(fmt(pred.ci68.low,0) + ' ');
+
+    const sepWrap = document.createElement('span');
+    sepWrap.style.display = 'inline-flex';
+    sepWrap.style.flexDirection = 'column';
+    sepWrap.style.alignItems = 'center';
+    sepWrap.style.verticalAlign = 'middle';
+    sepWrap.style.lineHeight = '1';
+    sepWrap.style.margin = '0 2px';
+
+    const arrowSpan = document.createElement('span');
+    arrowSpan.style.fontSize = '14px';
+    arrowSpan.style.fontWeight = '700';
+    arrowSpan.style.height = '14px';
+    const analogBaseline = raw.adrAnalogMatches && raw.adrAnalogMatches.avgTwOpenAdjusted != null
+      ? raw.adrAnalogMatches.avgTwOpenAdjusted : null;
+    if (analogBaseline != null && analogBaseline < pred.ci68.low) {
+      arrowSpan.textContent = '←';
+      arrowSpan.style.color = 'var(--good)';
+    } else if (analogBaseline != null && analogBaseline > pred.ci68.high) {
+      arrowSpan.textContent = '→';
+      arrowSpan.style.color = 'var(--critical)';
+    }
+    sepWrap.appendChild(arrowSpan);
+
+    const tildeSpan = document.createElement('span');
+    tildeSpan.textContent = '~';
+    tildeSpan.style.fontWeight = '700';
+    sepWrap.appendChild(tildeSpan);
+
+    priceEl.appendChild(sepWrap);
+    priceEl.append(' ' + fmt(pred.ci68.high,0) + ' 元');
     document.getElementById('prediction-delta').style.display = 'none';
     // forDate是這次預測「算出來的那個台北日曆日」(後端merge-and-classify.mjs寫入)，用來
     // 標示這張卡片目前顯示的是哪一天的預測——鎖定時間窗內手動觸發不會重算，這個日期就會
@@ -536,9 +580,10 @@
     // 依據互相矛盾，使用者會覺得資料兜不起來。
     const subEl = document.getElementById('prediction-sub');
     if (subEl) {
-      subEl.textContent = isV4
+      subEl.textContent = (isV4
         ? '依近1年「ADR隔夜漲跌% + ADR溢價率偏離歷史均值 + ADR歷史相近價位類比估計缺口% + TX夜盤變動%」四變數迴歸模型，套用今天的ADR變動、溢價狀態、類比估計與台指期夜盤變動推估'
-        : '依近1年「ADR隔夜漲跌% + ADR溢價率偏離歷史均值 + ADR歷史相近價位類比估計缺口%」三變數迴歸模型，套用今天的ADR變動、溢價狀態與類比估計推估';
+        : '依近1年「ADR隔夜漲跌% + ADR溢價率偏離歷史均值 + ADR歷史相近價位類比估計缺口%」三變數迴歸模型，套用今天的ADR變動、溢價狀態與類比估計推估')
+        + '。~上方的←/→表示「ADR歷史相近價位類比估計」落在區間外側(兩種方法出現分歧)；無箭頭表示落在區間內(兩種方法互相印證)';
     }
 
     const predMetrics = [
