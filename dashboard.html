@@ -139,7 +139,8 @@
       <div><span class="delta" id="taifex-night-delta"></span></div>
     </div>
   </div>
-  <div style="font-weight:600; margin:14px 0 6px;">夜盤K線圖（近6個月）</div>
+  <div style="font-weight:600; margin:14px 0 6px;">夜盤K線圖（近6個月，MA5/20/60、布林通道）</div>
+  <div class="legend" id="taifex-night-legend"></div>
   <div class="chart-wrap"><svg id="chart-taifex-night" width="100%" viewBox="0 0 900 240" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-taifex-night"></div></div>
   <div style="font-weight:600; margin:14px 0 6px;">成交量</div>
   <div class="chart-wrap"><svg id="chart-taifex-night-volume" width="100%" viewBox="0 0 900 70" preserveAspectRatio="none"></svg><div class="tooltip" id="tooltip-taifex-night-volume"></div></div>
@@ -833,10 +834,43 @@
       volume: h.volume ?? 0,
     }));
     const n2 = bars.length;
+
+    // MA5/MA20/MA60 + 布林通道(20,2)：跟主K線圖(scripts/update-dashboard.mjs的
+    // computeIndicators)同一套算法(簡單移動平均 + 20日標準差*2)，只是這裡純粹用夜盤
+    // 收盤價在前端即時算，不用另外走一趟後端管線——夜盤K線圖不像台股日K那樣還需要
+    // RSI/MACD/KD這些比較複雜的平滑指標，MA/布林通道用收盤價序列就能算，沒有必要為了
+    // 這兩個指標多存一份data.json欄位、多維護一條後端管線。
+    const closes2 = bars.map((b) => b.close);
+    function sma2(idx, period) {
+      if (idx < period - 1) return null;
+      let sum = 0;
+      for (let i = idx - period + 1; i <= idx; i++) sum += closes2[i];
+      return sum / period;
+    }
+    function stdDev2(idx, period) {
+      if (idx < period - 1) return null;
+      const mean = sma2(idx, period);
+      let sumSq = 0;
+      for (let i = idx - period + 1; i <= idx; i++) sumSq += (closes2[i] - mean) ** 2;
+      return Math.sqrt(sumSq / period);
+    }
+    const ind2 = bars.map((b, i) => {
+      const ma20 = sma2(i, 20);
+      const sd = stdDev2(i, 20);
+      return {
+        ma5: sma2(i, 5),
+        ma20,
+        ma60: sma2(i, 60),
+        bbUpper: ma20 != null && sd != null ? ma20 + 2 * sd : null,
+        bbLower: ma20 != null && sd != null ? ma20 - 2 * sd : null,
+      };
+    });
+
     const svg2 = document.getElementById('chart-taifex-night');
     const W2 = 900, H2 = 240, padT2 = 10, padB2 = 20, padL2 = 50, padR2 = 10;
     let lo2 = Infinity, hi2 = -Infinity;
     bars.forEach((b) => { lo2 = Math.min(lo2, b.low); hi2 = Math.max(hi2, b.high); });
+    ind2.forEach((r) => { if (r.bbUpper != null) hi2 = Math.max(hi2, r.bbUpper); if (r.bbLower != null) lo2 = Math.min(lo2, r.bbLower); });
     const pad2 = (hi2-lo2)*0.06 || Math.max(1, hi2*0.01); lo2 -= pad2; hi2 += pad2;
     function y2(v) { return padT2 + (H2-padT2-padB2) * (1 - (v-lo2)/(hi2-lo2)); }
     function x2(i) { return padL2 + (W2-padL2-padR2) * (i / Math.max(n2-1,1)); }
@@ -846,6 +880,15 @@
       const yy = y2(v);
       svg2.appendChild(el('line', {x1:padL2, x2:W2-padR2, y1:yy, y2:yy, stroke:'var(--grid)', 'stroke-width':1}));
       axisLabel(svg2, padL2-6, yy+3, fmt(v,0), 'end');
+    }
+
+    // 布林通道底色：畫在蠟燭之下，跟主K線圖一樣先畫這層再畫蠟燭，蠟燭才不會被蓋住。
+    const upperPts2 = [], lowerPts2 = [];
+    ind2.forEach((r,i) => { if (r.bbUpper!=null) upperPts2.push([x2(i), y2(r.bbUpper)]); });
+    ind2.forEach((r,i) => { if (r.bbLower!=null) lowerPts2.push([x2(i), y2(r.bbLower)]); });
+    if (upperPts2.length && lowerPts2.length) {
+      const bandPath2 = 'M ' + upperPts2.map(p=>p.join(',')).join(' L ') + ' L ' + lowerPts2.slice().reverse().map(p=>p.join(',')).join(' L ') + ' Z';
+      svg2.appendChild(el('path', {d: bandPath2, fill: 'var(--bb-fill)', stroke: 'none'}));
     }
 
     const candleW = Math.max(1.2, Math.min(6, (W2-padL2-padR2)/n2*0.6));
@@ -859,6 +902,22 @@
       svg2.appendChild(el('line', {x1:cx,x2:cx,y1:y2(b.high),y2:y2(b.low), stroke:color, 'stroke-width':1}));
       const bodyTop = y2(Math.max(b.open,b.close)), bodyBot = y2(Math.min(b.open,b.close));
       svg2.appendChild(el('rect', {x:cx-candleW/2, y:bodyTop, width:candleW, height:Math.max(1,bodyBot-bodyTop), fill:color}));
+    });
+
+    // MA線：畫在蠟燭之上，跟主K線圖同一套drawLine手法(逐點連成一條path，null值處自然斷開)。
+    function drawLine2(key, colorVar) {
+      let d = '';
+      ind2.forEach((r,i) => { if (r[key]!=null) { const cmd = d ? 'L' : 'M'; d += cmd+' '+x2(i)+','+y2(r[key])+' '; } });
+      if (d) svg2.appendChild(el('path', {d, fill:'none', stroke:colorVar, 'stroke-width':2, 'stroke-linejoin':'round', 'stroke-linecap':'round'}));
+    }
+    drawLine2('ma5','var(--ma5)'); drawLine2('ma20','var(--ma20)'); drawLine2('ma60','var(--ma60)');
+
+    const legend2 = document.getElementById('taifex-night-legend');
+    [['MA5','var(--ma5)'],['MA20','var(--ma20)'],['MA60','var(--ma60)'],['布林通道(20,2)','var(--bb-fill)']].forEach(([label,color],idx)=>{
+      const item = document.createElement('div'); item.className='legend-item';
+      const sw = document.createElement('span'); sw.className='legend-swatch'+(idx===3?' fill':''); sw.style.background=color;
+      const lt = document.createElement('span'); lt.textContent = label;
+      item.appendChild(sw); item.appendChild(lt); legend2.appendChild(item);
     });
 
     [0, Math.floor(n2/2), n2-1].forEach((i) => {
@@ -883,11 +942,18 @@
       tooltip2.style.left = Math.min(rect.width-190, Math.max(0,(px/W2)*rect.width+10)) + 'px';
       tooltip2.style.top = '10px';
       tooltip2.innerHTML = '';
+      const r2 = ind2[i];
       const dateEl = document.createElement('div'); dateEl.className='t-date'; dateEl.textContent = b.date;
       tooltip2.appendChild(dateEl);
-      [['開', fmt(b.open,0)], ['高', fmt(b.high,0)], ['低', fmt(b.low,0)], ['收', fmt(b.close,0)]].forEach(([k,v])=>{
+      const rows2 = [
+        ['開', fmt(b.open,0), null], ['高', fmt(b.high,0), null], ['低', fmt(b.low,0), null], ['收', fmt(b.close,0), null],
+        ['MA5', fmt(r2.ma5,0), 'var(--ma5)'], ['MA20', fmt(r2.ma20,0), 'var(--ma20)'], ['MA60', fmt(r2.ma60,0), 'var(--ma60)']
+      ];
+      rows2.forEach(([k,v,color])=>{
         const row = document.createElement('div'); row.className='t-row';
-        const kEl = document.createElement('span'); kEl.className='k'; kEl.textContent = k;
+        const kEl = document.createElement('span'); kEl.className='k';
+        if (color) { const key = document.createElement('span'); key.className='tkey'; key.style.background=color; kEl.appendChild(key); }
+        const kt = document.createElement('span'); kt.textContent = k; kEl.appendChild(kt);
         const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = v;
         row.appendChild(kEl); row.appendChild(vEl); tooltip2.appendChild(row);
       });
