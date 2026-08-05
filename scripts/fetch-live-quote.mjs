@@ -48,8 +48,8 @@ async function fetchLiveQuote() {
 // 抓的時候，官方結算價(SettlementPrice)通常還沒算出來(要併入08:45後的一般交易時段才會有
 // 值)，只能先用當時的最後成交價(Last)頂著，跟官方結算價可能有落差(曾實測差到197點)。這裡
 // 趁交易時段每5分鐘都會執行一次的機會，重抓同一支API，一旦SettlementPrice出現就自動覆蓋掉
-// 暫定的Last值；date沒變就代表還是同一個夜盤，changePct(相對前一天)維持原本算好的值不動，
-// 只換掉close本身。
+// 暫定的Last值；date沒變就代表還是同一個夜盤，changePct/changePts(相對前一場夜盤)維持
+// 原本算好的值不動，只換掉close/open/high/low/volume這幾個「這場夜盤本身」的欄位。
 async function refreshTaifexNightClose(raw) {
   const url = "https://openapi.taifex.com.tw/v1/DailyMarketReportFut";
   const res = await fetch(url, { headers: { "User-Agent": UA } });
@@ -62,6 +62,11 @@ async function refreshTaifexNightClose(raw) {
   const row = night[0];
   const close = toNum(row["SettlementPrice"]) ?? toNum(row["Last"]);
   if (close == null) return;
+  // 欄位名稱驗證見fetch-market-context.mjs的fetchTaifexNightClose同一段註解。
+  const open = toNum(row["Open"]);
+  const high = toNum(row["High"]);
+  const low = toNum(row["Low"]);
+  const volume = toNum(row["Volume"]);
   const rawDate = row["Date"];
   const date = rawDate && String(rawDate).length === 8
     ? `${String(rawDate).slice(0, 4)}-${String(rawDate).slice(4, 6)}-${String(rawDate).slice(6, 8)}`
@@ -71,10 +76,11 @@ async function refreshTaifexNightClose(raw) {
   const prev = raw.taifexNightClose;
   if (!prev || prev.date !== date) {
     const changePct = prev && prev.close != null ? Math.round((close / prev.close - 1) * 10000) / 100 : null;
-    raw.taifexNightClose = { contractMonth: row["ContractMonth(Week)"] || null, close, changePct, date };
-  } else if (prev.close !== close) {
-    raw.taifexNightClose = { ...prev, close, contractMonth: row["ContractMonth(Week)"] || prev.contractMonth };
-    console.log(`已校正 taifexNightClose 收盤價: ${prev.close} -> ${close}`);
+    const changePts = prev && prev.close != null ? Math.round((close - prev.close) * 100) / 100 : null;
+    raw.taifexNightClose = { contractMonth: row["ContractMonth(Week)"] || null, close, changePct, changePts, open, high, low, volume, date };
+  } else if (prev.close !== close || prev.open !== open || prev.high !== high || prev.low !== low || prev.volume !== volume) {
+    raw.taifexNightClose = { ...prev, close, open, high, low, volume, contractMonth: row["ContractMonth(Week)"] || prev.contractMonth };
+    console.log(`已校正 taifexNightClose: 收盤 ${prev.close} -> ${close}`);
   }
 }
 

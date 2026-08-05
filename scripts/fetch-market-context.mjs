@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = join(__dirname, "..", "data", "data.json");
+const TX_NIGHT_HISTORY_PATH = join(__dirname, "..", "data", "taifex-night-history.json");
 const STOCK_NO = "2330";
 const UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
 
@@ -162,7 +163,10 @@ async function fetchOptionsMarket() {
 //
 // 欄位名稱已用實際回傳資料驗證過(2026-07-28 GitHub Actions run)：收盤價欄位是"Last"
 // 或"SettlementPrice"，合約月份欄位是"ContractMonth(Week)"，不是原本猜的"Close"/
-// "ContractMonth"。
+// "ContractMonth"。開高低量欄位也已驗證過(2026-08-05 GitHub Actions run，完整原始列：
+// {"Date":"20260804",...,"Open":"43003","High":"43165","Low":"42104","Last":"43152",
+// "Change":"-67","%":"-0.16%","Volume":"51504","SettlementPrice":"NULL",...})，就是
+// 直白的"Open"/"High"/"Low"/"Volume"。
 //
 // 2026-07-28實際比對發現：06:00這次排程抓到的"Last"(43369)跟外部來源(玩股網等)公布
 // 的官方夜盤收盤(43172)對不上，落差達197點——當時SettlementPrice還是字串"NULL"，代表
@@ -194,18 +198,33 @@ async function fetchTaifexNightClose(previous) {
   const row = night[0];
   const close = toNum(row["SettlementPrice"]) ?? toNum(row["Last"]);
   if (close == null) throw new Error(`TX盤後資料找到但無法解析收盤價欄位，原始資料=${JSON.stringify(row)}`);
+  // OHLC/成交量：欄位名稱已用實際回傳資料驗證過(2026-08-05 GitHub Actions run)，就是
+  // 直白的"Open"/"High"/"Low"/"Volume"，數值是字串。這幾個欄位供夜盤K線圖使用；不用
+  // TAIFEX原始回傳裡自帶的"Change"/"%"欄位——那兩個欄位的計算基準沒有驗證過(可能是跟
+  // 日盤比而不是跟前一場夜盤比)，我們自己的changePct/changePts維持用「這場夜盤 vs 前一場
+  // 夜盤」的口徑計算，跟前端「夜盤自己比自己」的既有邏輯一致。
+  const open = toNum(row["Open"]);
+  const high = toNum(row["High"]);
+  const low = toNum(row["Low"]);
+  const volume = toNum(row["Volume"]);
   const rawDate = row["Date"];
   const date = rawDate && String(rawDate).length === 8
     ? `${String(rawDate).slice(0, 4)}-${String(rawDate).slice(4, 6)}-${String(rawDate).slice(6, 8)}`
     : null;
-  let changePct = null;
+  let changePct = null, changePts = null;
   if (previous && previous.close != null && previous.date && date && previous.date !== date) {
     changePct = Math.round((close / previous.close - 1) * 10000) / 100;
+    changePts = Math.round((close - previous.close) * 100) / 100;
   }
   return {
     contractMonth: row["ContractMonth(Week)"] || null,
     close,
     changePct,
+    changePts,
+    open,
+    high,
+    low,
+    volume,
     date,
   };
 }
@@ -266,6 +285,42 @@ function classifyChipTrend(raw) {
   return { verdict, cls, reasons, risk };
 }
 
+// 台指期(TX)夜盤歷史序列：永久保留、逐日累積（跟merge-and-classify.mjs的
+// updateAdrPremiumHistory同一套read-try/catch→Map upsert-by-date→sort→write模式），
+// 供「開盤價機率預估」四變數模型(buildOpenGapModelV4)訓練用。這裡只在「換日」那一刻
+// (previous.date !== raw.taifexNightClose.date)才把previous這筆append進去——因為
+// previous換日後就確定不會再被fetchTaifexNightClose的校正邏輯改動了(校正只發生在
+// 「同一個date」的情況)，此時才是它真正定案、可以永久寫入的時間點；raw.taifexNightClose
+// 目前這筆(還在今天)則留給明天換日時才寫入，不提前寫，避免把還可能被SettlementPrice
+// 校正的暫定值寫死進歷史。
+async function appendTaifexNightHistory(previous, current) {
+  if (!previous || previous.close == null || previous.date == null) return;
+  if (!current || current.date == null || current.date === previous.date) return;
+  let history = [];
+  try {
+    history = JSON.parse(await readFile(TX_NIGHT_HISTORY_PATH, "utf8"));
+  } catch {
+    // 檔案不存在或格式壞掉，視為空歷史，從頭建立
+  }
+  const byDate = new Map(history.map((h) => [h.date, h]));
+  // open/high/low/volume是後來才加的欄位，種子歷史(使用者提供的CSV回填那384筆)沒有這幾
+  // 個值，統一用??null讓欄位形狀固定，前端渲染K線圖時再自行判斷要不要退化處理，不在這裡
+  // 硬塞假資料。
+  byDate.set(previous.date, {
+    date: previous.date,
+    close: previous.close,
+    changePct: previous.changePct ?? null,
+    changePts: previous.changePts ?? null,
+    open: previous.open ?? null,
+    high: previous.high ?? null,
+    low: previous.low ?? null,
+    volume: previous.volume ?? null,
+  });
+  const merged = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  await writeFile(TX_NIGHT_HISTORY_PATH, JSON.stringify(merged), "utf8");
+  console.log(`已更新台指期夜盤歷史紀錄: ${TX_NIGHT_HISTORY_PATH}（累計 ${merged.length} 筆，新增/更新 ${previous.date}）`);
+}
+
 async function safe(label, fn) {
   try {
     return await fn();
@@ -283,6 +338,7 @@ async function main() {
   raw.taiexIndex = await safe("TAIEX指數", () => fetchYahooIndex("^TWII"));
   const previousTaifexNightClose = raw.taifexNightClose;
   raw.taifexNightClose = await safe("台指期夜盤收盤", () => fetchTaifexNightClose(previousTaifexNightClose));
+  await safe("台指期夜盤歷史紀錄累積", () => appendTaifexNightHistory(previousTaifexNightClose, raw.taifexNightClose));
   raw.institutionalNet = await safe("三大法人買賣超", () => fetchInstitutionalNet(raw.daily));
   raw.exDividend = await safe("除權息預告", fetchExDividend);
   raw.optionsMarket = await safe("選擇權未平倉", fetchOptionsMarket);

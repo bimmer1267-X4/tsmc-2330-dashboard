@@ -29,6 +29,7 @@ const DATA_PATH = join(__dirname, "..", "data", "data.json");
 const CONFIG_PATH = join(__dirname, "..", "data", "config.json");
 const PREMIUM_HISTORY_PATH = join(__dirname, "..", "data", "adr-premium-history.json");
 const PREDICTION_HISTORY_PATH = join(__dirname, "..", "data", "prediction-accuracy-history.json");
+const TX_NIGHT_HISTORY_PATH = join(__dirname, "..", "data", "taifex-night-history.json");
 const YF_UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
 // ADR/匯率序列固定抓1年：「套牢價(ADR近6個月最高)」「ADR歷史相近價位類比估計」這兩個
 // 既有功能仍然只看近6個月(用filterSeriesToRecentMonths從這份1年資料裡篩出6個月子集，
@@ -39,6 +40,7 @@ const REGRESSION_WINDOW_MONTHS = 12;
 const MIN_REGRESSION_SAMPLES = 20;
 const MIN_REGRESSION_SAMPLES_V2 = 60;
 const MIN_REGRESSION_SAMPLES_V3 = 80;
+const MIN_REGRESSION_SAMPLES_V4 = 80;
 // 溢價率「相對自身近期水準」的移動平均天數，用來算「溢價偏離」這個預測變數。
 const PREMIUM_ROLL_WINDOW_DAYS = 60;
 // 開盤價預測準確度追蹤：統計區間樣本數低於這個門檻就不顯示(避免早期少量樣本產生誤導性
@@ -391,6 +393,7 @@ function buildPredictionHistoryEntry(openPrediction, modelTier, predictedDateStr
     basisAdrChangePct: openPrediction.basisAdrChangePct,
     basisPremiumDevPct: openPrediction.basisPremiumDevPct ?? null,
     basisAnalogGapPct: openPrediction.basisAnalogGapPct ?? null,
+    basisTxNightChangePct: openPrediction.basisTxNightChangePct ?? null,
     basisPrevClose: openPrediction.basisPrevClose,
     residualStd: m.residualStd,
     confidenceIndexPct: m.confidenceIndexPct ?? null,
@@ -406,6 +409,10 @@ function buildPredictionHistoryEntry(openPrediction, modelTier, predictedDateStr
 // 算出「如果那天用這個(已經擬合好的)模型會預測出的開盤缺口%」——只給「種子回溯」使用，
 // 邏輯跟main()裡即時預測套用係數的算法完全一致，只是輸入換成歷史配對而不是「今天」的值。
 function predictGapPctForTier(pair, modelTier, model) {
+  if (modelTier === 4) {
+    const [b0, b1, b2, b3, b4] = model.beta;
+    return b0 + b1 * pair.adrChangePct + b2 * pair.premiumDev + b3 * pair.analogGapPct + b4 * pair.txNightChangePct;
+  }
   if (modelTier === 3) {
     const [b0, b1, b2, b3] = model.beta;
     return b0 + b1 * pair.adrChangePct + b2 * pair.premiumDev + b3 * pair.analogGapPct;
@@ -494,6 +501,7 @@ function seedPredictionHistoryIfEmpty(history, modelPairs, modelTier, model, adr
       basisAdrChangePct: round(pair.adrChangePct, 2),
       basisPremiumDevPct: modelTier >= 2 ? round(pair.premiumDev, 2) : null,
       basisAnalogGapPct: modelTier >= 3 ? round(pair.analogGapPct, 2) : null,
+      basisTxNightChangePct: modelTier >= 4 ? round(pair.txNightChangePct, 2) : null,
       basisPrevClose: pair.prevClose,
       residualStd: round(model.residualStd, 4),
       confidenceIndexPct: modelTier >= 2 ? round(Math.max(0, model.adjR2) * 100, 1) : null,
@@ -901,6 +909,79 @@ function buildOpenGapModelV3(adrSeries, fxSeries, twDaily, premiumHistory, rollW
   return { ...reg, residualStd, hitRate, pairs: pairsSorted };
 }
 
+// 四變數版本：V3再加一項「台指期(TX)夜盤收盤變動%」。TX夜盤(15:00~次日05:00)結算併入
+// 次一般交易時段(見fetch-market-context.mjs的fetchTaifexNightClose註解)，所以「夜盤日期
+// D」代表的是D當天15:00開始、D+1 05:00收盤的那一場，跟ADR一樣屬於「隔夜到隔天開盤前
+// 才知道結果」的輸入，用同一套「找第一個date>D的twDaily」對齊法（不是同一天，是D+1）。
+// txNightHistory: [{date, close, changePct}]（date=TAIFEX官方夜盤標示的起始日D，
+// changePct=這場夜盤收盤 vs 前一個交易日夜盤收盤的漲跌%，來源見fetchTaifexNightClose/
+// refreshTaifexNightClose，兩者定義一致，可以直接沿用不用重算）。
+function buildOpenGapModelV4(adrSeries, fxSeries, twDaily, premiumHistory, txNightHistory, rollWindowDays) {
+  const adrMap = new Map(adrSeries.map((s) => [s.date, s.close]));
+  const adrDates = adrSeries.map((s) => s.date);
+  const fxMap = new Map(fxSeries.map((s) => [s.date, s.close]));
+  const fxDates = fxSeries.map((s) => s.date).sort();
+
+  const premiumSorted = [...premiumHistory].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const premiumIndexByDate = new Map(premiumSorted.map((h, i) => [h.date, i]));
+  const txNightMap = new Map((txNightHistory || []).map((h) => [h.date, h.changePct]));
+
+  const pairs = [];
+  for (let i = 1; i < adrDates.length; i++) {
+    const D = adrDates[i], Dprev = adrDates[i - 1];
+    const adrClose = adrMap.get(D), adrClosePrev = adrMap.get(Dprev);
+    const adrChangePct = (adrClose / adrClosePrev - 1) * 100;
+
+    const fx = nearestOnOrBefore(fxMap, fxDates, D);
+    if (fx == null) continue;
+
+    let tIdx = -1;
+    for (let j = 0; j < twDaily.length; j++) {
+      if (twDaily[j].date > D) { tIdx = j; break; }
+    }
+    if (tIdx <= 0) continue;
+    const T = twDaily[tIdx], Tprev = twDaily[tIdx - 1];
+    const twOpenGapPct = (T.open / Tprev.close - 1) * 100;
+
+    const pIdx = premiumIndexByDate.get(Tprev.date);
+    if (pIdx == null) continue;
+    const windowStart = Math.max(0, pIdx - rollWindowDays + 1);
+    const window = premiumSorted.slice(windowStart, pIdx + 1).map((h) => h.premiumPct);
+    if (window.length < Math.min(rollWindowDays, 20)) continue;
+    const premiumDev = premiumSorted[pIdx].premiumPct - mean(window);
+
+    const adrTrunc = adrSeries.filter((s) => s.date <= D);
+    const fxTrunc = fxSeries.filter((s) => s.date <= D);
+    const twTrunc = twDaily.filter((t) => t.date < T.date);
+    const analog = findAnalogMatches(adrClose, adrTrunc, fxTrunc, twTrunc);
+    if (!analog) continue;
+    const analogGapPct = (analog.avgTwOpen / Tprev.close - 1) * 100;
+
+    // TX夜盤配對用同一個ADR日期D去找對應的夜盤日期D這一場(同一個「隔夜」概念)——D這天
+    // 15:00開始的夜盤，跟D這天美股ADR是同一個交易日晚上發生的兩件事，理論上都在T(D+1)
+    // 開盤前就已知，配對邏輯上跟ADR共用同一個D。
+    const txNightChangePct = txNightMap.get(D);
+    if (txNightChangePct == null) continue;
+
+    pairs.push({ twDate: T.date, adrDate: D, adrClose, adrChangePct, premiumDev, analogGapPct, txNightChangePct, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
+  }
+
+  const byTwDate = new Map();
+  for (const p of pairs) byTwDate.set(p.twDate, p);
+  const uniq = [...byTwDate.values()];
+  if (uniq.length < MIN_REGRESSION_SAMPLES_V4) return null;
+
+  const X = uniq.map((p) => [1, p.adrChangePct, p.premiumDev, p.analogGapPct, p.txNightChangePct]);
+  const y = uniq.map((p) => p.twOpenGapPct);
+  const reg = olsRegressionN(X, y);
+  const residuals = uniq.map((p, i) => y[i] - (reg.beta[0] + reg.beta[1] * p.adrChangePct + reg.beta[2] * p.premiumDev + reg.beta[3] * p.analogGapPct + reg.beta[4] * p.txNightChangePct));
+  const residualStd = stddev(residuals);
+  const hitRate = uniq.filter((p) => Math.sign(p.adrChangePct) === Math.sign(p.twOpenGapPct) && p.adrChangePct !== 0).length / uniq.length;
+
+  const pairsSorted = [...uniq].sort((a, b) => (a.twDate < b.twDate ? -1 : a.twDate > b.twDate ? 1 : 0));
+  return { ...reg, residualStd, hitRate, pairs: pairsSorted };
+}
+
 function classifyZone(pe, rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60, peLabel) {
   const reasons = [];
   if (pe > 28) reasons.push(`${peLabel} ${pe.toFixed(1)} 倍 > 28倍上緣`);
@@ -1024,6 +1105,20 @@ async function main() {
 
   const premiumHistory = await updateAdrPremiumHistory(twDaily1y, adrDaily, fxDaily, adrRatio);
 
+  // 台指期(TX)夜盤歷史序列：純讀取，累積寫入交給fetch-market-context.mjs的
+  // fetchTaifexNightClose（偵測到換日、前一筆確定不會再被校正時才append），這裡不寫檔。
+  let txNightHistory = [];
+  try {
+    txNightHistory = JSON.parse(await readFile(TX_NIGHT_HISTORY_PATH, "utf8"));
+  } catch {
+    // 檔案不存在或格式壞掉，視為空歷史——四變數模型樣本數不足時會自動退回三變數版本
+  }
+
+  // 夜盤K線圖只需要近6個月子集，跟既有K線圖／ADR歷史相近價位類比估計的6個月語意一致
+  // (filterSeriesToRecentMonths跟那兩個功能共用同一支函式)。完整歷史留在
+  // data/taifex-night-history.json裡供V4模型訓練用，不整包灌進data.json。
+  d.taifexNightHistory = filterSeriesToRecentMonths(txNightHistory, 6);
+
   const impliedTwd = Math.round(((adrPrice / adrRatio) * usdTwd) * 100) / 100;
   const premiumPct = Math.round((((impliedTwd - d.valuation.closePrice) / d.valuation.closePrice) * 100) * 100) / 100;
 
@@ -1110,15 +1205,88 @@ async function main() {
   }
 
   // ---- 台股開盤價機率預估 ----
-  // 三層退回：優先用三變數模型(ADR漲跌% + 溢價偏離% + ADR歷史相近價位類比估計缺口%)；
-  // 樣本數不足(MIN_REGRESSION_SAMPLES_V3)或今天剛好找不到任何類比比對時，退回只帶
-  // 溢價偏離的雙變數模型；溢價歷史也不夠長的話再退回僅ADR漲跌%的單變數模型。不管哪一層
-  // 都不讓卡片直接消失——這些退回路徑理論上只有在資料還在累積的最初期間才會用到，1年
-  // 回填後樣本數已經足夠，正常情況下應該都會走三變數模型。
+  // 四層退回：優先用四變數模型(ADR漲跌% + 溢價偏離% + ADR歷史相近價位類比估計缺口% +
+  // TX夜盤變動%)；TX夜盤歷史樣本數不足(MIN_REGRESSION_SAMPLES_V4)、或今天的
+  // d.taifexNightClose剛好還沒有值時，退回三變數模型；樣本數不足(MIN_REGRESSION_
+  // SAMPLES_V3)或今天剛好找不到任何類比比對時，再退回只帶溢價偏離的雙變數模型；溢價
+  // 歷史也不夠長的話最後退回僅ADR漲跌%的單變數模型。不管哪一層都不讓卡片直接消失——
+  // 這些退回路徑理論上只有在資料還在累積的最初期間才會用到，1年回填後樣本數已經足夠，
+  // 正常情況下應該都會走四變數模型。
   let predicted = false;
   let predictionTier = null;
   let predictionModel = null;
   if (adrDaily && fxDaily) {
+    try {
+      const model4 = twDaily1y.length > 0
+        ? buildOpenGapModelV4(adrDaily.series, fxDaily.series, twDaily1y, premiumHistory, txNightHistory, PREMIUM_ROLL_WINDOW_DAYS)
+        : null;
+      const txNightChangePctNow = d.taifexNightClose?.changePct ?? null;
+      // 「今天」的類比估計缺口%要用跟訓練時同一套函式(findAnalogMatches)、同一份完整
+      // 1年序列現算，這樣訓練特徵跟預測當下用的特徵才是同一種算法，不會兩邊邏輯不一致。
+      const analogNow4 = model4 ? findAnalogMatches(adrPrice, adrDaily.series, fxDaily.series, twDaily1y) : null;
+
+      if (model4 && analogNow4 && txNightChangePctNow != null) {
+        const premiumHistorySorted4 = [...premiumHistory].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        const latestPremium4 = premiumHistorySorted4[premiumHistorySorted4.length - 1];
+        const rollWindow4 = premiumHistorySorted4.slice(Math.max(0, premiumHistorySorted4.length - PREMIUM_ROLL_WINDOW_DAYS)).map((h) => h.premiumPct);
+        const premiumDevNow4 = latestPremium4.premiumPct - mean(rollWindow4);
+        const base4 = d.valuation.closePrice;
+        const analogGapNowPct4 = (analogNow4.avgTwOpen / base4 - 1) * 100;
+
+        const [b0, b1, b2, b3, b4] = model4.beta;
+        const predictedGapPct = b0 + b1 * adrChangePct + b2 * premiumDevNow4 + b3 * analogGapNowPct4 + b4 * txNightChangePctNow;
+        const priceAt = (gapPct) => round(base4 * (1 + gapPct / 100), 2);
+        const probUpPct = round(normalCdf(predictedGapPct / model4.residualStd) * 100, 1);
+        const confidenceIndexPct = round(Math.max(0, model4.adjR2) * 100, 1);
+
+        d.openPrediction = {
+          predictedGapPct: round(predictedGapPct, 2),
+          predictedOpen: priceAt(predictedGapPct),
+          ci68: { low: priceAt(predictedGapPct - model4.residualStd), high: priceAt(predictedGapPct + model4.residualStd) },
+          ci95: { low: priceAt(predictedGapPct - 1.96 * model4.residualStd), high: priceAt(predictedGapPct + 1.96 * model4.residualStd) },
+          probUpPct,
+          basisAdrChangePct: adrChangePct,
+          basisPremiumDevPct: round(premiumDevNow4, 2),
+          basisAnalogGapPct: round(analogGapNowPct4, 2),
+          basisTxNightChangePct: txNightChangePctNow,
+          basisPrevClose: base4,
+          model: {
+            method: "OLS四變數迴歸（開盤缺口% ~ ADR漲跌% + 溢價偏離% + ADR歷史相近價位類比估計缺口% + TX夜盤變動%）",
+            interceptB0: round(b0, 4),
+            adrChangeCoefB1: round(b1, 4),
+            premiumDevCoefB2: round(b2, 4),
+            analogGapCoefB3: round(b3, 4),
+            txNightChangeCoefB4: round(b4, 4),
+            r2: round(model4.r2, 4),
+            adjR2: round(model4.adjR2, 4),
+            tAdrChange: round(model4.t[1], 2),
+            tPremiumDev: round(model4.t[2], 2),
+            tAnalogGap: round(model4.t[3], 2),
+            tTxNightChange: round(model4.t[4], 2),
+            pAdrChange: round(model4.p[1], 4),
+            pPremiumDev: round(model4.p[2], 4),
+            pAnalogGap: round(model4.p[3], 4),
+            pTxNightChange: round(model4.p[4], 4),
+            residualStd: round(model4.residualStd, 4),
+            hitRatePct: round(model4.hitRate * 100, 1),
+            sampleSize: model4.n,
+            windowMonths: REGRESSION_WINDOW_MONTHS,
+            premiumRollWindowDays: PREMIUM_ROLL_WINDOW_DAYS,
+            analogTolerancePct: analogNow4.tolerancePct,
+            confidenceIndexPct,
+          },
+        };
+        predicted = true;
+        predictionTier = 4;
+        predictionModel = model4;
+        console.log(`開盤價機率預估(四變數): 缺口${d.openPrediction.predictedGapPct}%  預估開盤價${d.openPrediction.predictedOpen}  上漲機率${probUpPct}%（調整後R²=${model4.adjR2.toFixed(3)}, n=${model4.n}, TX夜盤變動t值=${model4.t[4].toFixed(2)}）`);
+      }
+    } catch (e) {
+      console.warn("四變數開盤價機率預估計算失敗，將嘗試三變數版本: " + e.message);
+    }
+  }
+
+  if (!predicted && adrDaily && fxDaily) {
     try {
       const model3 = twDaily1y.length > 0
         ? buildOpenGapModelV3(adrDaily.series, fxDaily.series, twDaily1y, premiumHistory, PREMIUM_ROLL_WINDOW_DAYS)

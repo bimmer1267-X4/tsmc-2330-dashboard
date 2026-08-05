@@ -72,22 +72,31 @@ function Update-TaifexNightClose($Raw) {
     $close = ConvertTo-Num $row.SettlementPrice
     if (-not $close) { $close = ConvertTo-Num $row.Last }
     if (-not $close) { return $false }
+    # 欄位名稱驗證見fetch-market-context.ps1的Get-TaifexNightClose同一段註解。
+    $open = ConvertTo-Num $row.Open
+    $high = ConvertTo-Num $row.High
+    $low = ConvertTo-Num $row.Low
+    $volume = ConvertTo-Num $row.Volume
     if (-not $row.Date -or ([string]$row.Date).Length -ne 8) { return $false }
     $d = [string]$row.Date
     $isoDate = "{0}-{1}-{2}" -f $d.Substring(0,4), $d.Substring(4,2), $d.Substring(6,2)
 
     $prev = $Raw.taifexNightClose
     if (-not $prev -or $prev.date -ne $isoDate) {
-        $changePct = $null
-        if ($prev -and $prev.close) { $changePct = [math]::Round((($close / $prev.close) - 1) * 100, 2) }
+        $changePct = $null; $changePts = $null
+        if ($prev -and $prev.close) {
+            $changePct = [math]::Round((($close / $prev.close) - 1) * 100, 2)
+            $changePts = [math]::Round($close - $prev.close, 2)
+        }
         $Raw | Add-Member -MemberType NoteProperty -Name "taifexNightClose" -Value ([PSCustomObject]@{
-            contractMonth = $row.'ContractMonth(Week)'; close = $close; changePct = $changePct; date = $isoDate
+            contractMonth = $row.'ContractMonth(Week)'; close = $close; changePct = $changePct; changePts = $changePts
+            open = $open; high = $high; low = $low; volume = $volume; date = $isoDate
         }) -Force
         return $true
-    } elseif ($prev.close -ne $close) {
-        $prev.close = $close
+    } elseif ($prev.close -ne $close -or $prev.open -ne $open -or $prev.high -ne $high -or $prev.low -ne $low -or $prev.volume -ne $volume) {
+        $prev.close = $close; $prev.open = $open; $prev.high = $high; $prev.low = $low; $prev.volume = $volume
         if ($row.'ContractMonth(Week)') { $prev.contractMonth = $row.'ContractMonth(Week)' }
-        Write-Host "已校正 taifexNightClose 收盤價: $($prev.close) -> $close"
+        Write-Host "已校正 taifexNightClose: 收盤 -> $close"
         return $true
     }
     return $false
