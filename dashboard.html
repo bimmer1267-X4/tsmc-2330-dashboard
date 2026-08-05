@@ -956,13 +956,27 @@
       tooltip2.innerHTML = '';
       const dateEl = document.createElement('div'); dateEl.className='t-date'; dateEl.textContent = b.date;
       tooltip2.appendChild(dateEl);
-      // 只顯示收盤價：開高低對缺OHLC的舊資料(圓點那段)本來就是假的(退化用close填的)，
-      // 顯示出來反而誤導；MA也拿掉，滑動時要的是「這天收盤多少」的快速對照，不是完整
-      // 技術指標明細。
-      const row = document.createElement('div'); row.className='t-row';
-      const kEl = document.createElement('span'); kEl.className='k'; kEl.textContent = '收盤';
-      const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = fmt(b.close,0);
-      row.appendChild(kEl); row.appendChild(vEl); tooltip2.appendChild(row);
+      // 只顯示收盤價+漲跌點數/百分比：開高低對缺OHLC的舊資料(圓點那段)本來就是假的
+      // (退化用close填的)，顯示出來反而誤導；MA也拿掉，滑動時要的是「這天收盤多少、
+      // 比前一天漲跌多少」的快速對照，不是完整技術指標明細。漲跌一律比前一筆收盤價
+      // (不管有沒有真實開高低收，都是同一套「跟前一天比」的口徑，兩種資料才能一致)；
+      // 第一筆(i===0)沒有前一天可比，漲跌欄位留空。
+      const rowClose = document.createElement('div'); rowClose.className='t-row';
+      const kClose = document.createElement('span'); kClose.className='k'; kClose.textContent = '收盤';
+      const vClose = document.createElement('span'); vClose.className='v'; vClose.textContent = fmt(b.close,0);
+      rowClose.appendChild(kClose); rowClose.appendChild(vClose); tooltip2.appendChild(rowClose);
+
+      if (i > 0) {
+        const prevClose = bars[i-1].close;
+        const chgPts = b.close - prevClose;
+        const chgPct = (chgPts / prevClose) * 100;
+        const chgColor = chgPts >= 0 ? 'var(--critical)' : 'var(--good)';
+        const rowChg = document.createElement('div'); rowChg.className='t-row';
+        const kChg = document.createElement('span'); kChg.className='k'; kChg.textContent = '漲跌';
+        const vChg = document.createElement('span'); vChg.className='v'; vChg.style.color = chgColor;
+        vChg.textContent = (chgPts>=0?'+':'') + fmt(chgPts,0) + ' (' + (chgPct>=0?'+':'') + fmt(chgPct,2) + '%)';
+        rowChg.appendChild(kChg); rowChg.appendChild(vChg); tooltip2.appendChild(rowChg);
+      }
     });
     svg2.addEventListener('pointerleave', () => { tooltip2.style.display='none'; crosshair2.setAttribute('visibility','hidden'); });
 
