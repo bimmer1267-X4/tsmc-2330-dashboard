@@ -135,7 +135,7 @@
   <div class="sub" id="taifex-night-sub">--</div>
   <div class="header-row">
     <div>
-      <div class="hero" id="taifex-night-price" style="font-size:36px;">--</div>
+      <div class="hero" style="font-size:36px;"><span id="taifex-night-price">--</span><span id="taifex-night-date" style="font-size:16px; font-weight:700; color:var(--muted); margin-left:8px;"></span></div>
       <div><span class="delta" id="taifex-night-delta"></span></div>
     </div>
   </div>
@@ -799,6 +799,11 @@
     if (!t) { if (card) card.style.display = 'none'; return; }
 
     document.getElementById('taifex-night-price').textContent = fmt(t.close,0);
+    // t.date是夜盤標示的起始日(D，15:00開盤那天)，不是05:00收盤那天(D+1)——這裡直接標
+    // 這場夜盤自己的日期，跟.sub那行「這場夜盤時間窗：D 15:00～D+1 05:00收盤」、K線圖
+    // 最右邊那根bar的日期一致，不用另外換算成收盤日以免跟其他地方的日期標示對不起來。
+    const tDate = new Date(t.date + 'T00:00:00Z');
+    document.getElementById('taifex-night-date').textContent = (tDate.getUTCMonth()+1) + '月' + tDate.getUTCDate() + '日';
     const deltaEl = document.getElementById('taifex-night-delta');
     // changePts/changePct在「今天剛好是新的一場、還沒有前一場可以比」時會是null（理論上
     // 只有歷史序列完全是空的最初期間才會發生），這裡讓delta整行留白而不是顯示"null"字樣。
