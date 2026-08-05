@@ -25,10 +25,6 @@ jobs:
         with:
           node-version: "20"
 
-      - name: ONE-TIME 回填台指期夜盤歷史OHLC(用完即刪)
-        run: node scripts/backfill-taifex-night-ohlc.mjs
-        continue-on-error: true
-
       - name: Fetch TWSE daily data + technical indicators
         run: node scripts/update-dashboard.mjs
 
