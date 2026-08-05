@@ -373,22 +373,41 @@ async function safe(label, fn) {
   }
 }
 
+// --skip-market-context：跟merge-and-classify.mjs的--backfill-only同一套鎖定時間窗
+// 邏輯(見update-dashboard.yml)，手動觸發且落在鎖定時間窗內時使用。籌碼面/大盤指數這幾
+// 個欄位其實都是TWSE/TAIFEX單日公告一次的EOD資料、或即時跳動的市場指數，本身不像
+// 「盤前股價預測」有「用今天自己的收盤價預測今天」那種邏輯矛盾，重複抓取不會有正確性
+// 問題——這裡鎖定純粹是為了讓使用者在鎖定時間窗內看到的三張卡片(盤前預測/ADR類比估計/
+// 籌碼面與大盤指數)行為一致，不是為了修正資料本身的錯誤。
+// 台指期夜盤(taifexNightClose)不受這個旗標影響，鎖定期間依然照常更新——那張卡片本來就
+// 已經調整成「盡可能即時」，不在這次鎖定範圍內。
 async function main() {
   const raw = JSON.parse(await readFile(DATA_PATH, "utf8"));
+  const skipMarketContext = process.argv.slice(2).includes("--skip-market-context");
 
-  raw.marginTrading = await safe("融資融券餘額", fetchMarginTrading);
-  raw.soxIndex = await safe("SOX指數", () => fetchYahooIndex("^SOX"));
-  raw.taiexIndex = await safe("TAIEX指數", () => fetchYahooIndex("^TWII"));
+  if (!skipMarketContext) {
+    raw.marginTrading = await safe("融資融券餘額", fetchMarginTrading);
+    raw.soxIndex = await safe("SOX指數", () => fetchYahooIndex("^SOX"));
+    raw.taiexIndex = await safe("TAIEX指數", () => fetchYahooIndex("^TWII"));
+  } else {
+    console.log("手動觸發且落在鎖定時間窗內，籌碼面/大盤指數維持上一次的值，只更新夜盤資料");
+  }
+
   const previousTaifexNightClose = raw.taifexNightClose;
   raw.taifexNightClose = await safe("台指期夜盤收盤", () => fetchTaifexNightClose(previousTaifexNightClose));
   await safe("台指期夜盤歷史紀錄累積", () => appendTaifexNightHistory(previousTaifexNightClose, raw.taifexNightClose));
-  raw.institutionalNet = await safe("三大法人買賣超", () => fetchInstitutionalNet(raw.daily));
-  raw.exDividend = await safe("除權息預告", fetchExDividend);
-  raw.optionsMarket = await safe("選擇權未平倉", fetchOptionsMarket);
-  raw.chipTrend = await safe("籌碼面趨勢判讀", () => classifyChipTrend(raw));
+
+  if (!skipMarketContext) {
+    raw.institutionalNet = await safe("三大法人買賣超", () => fetchInstitutionalNet(raw.daily));
+    raw.exDividend = await safe("除權息預告", fetchExDividend);
+    raw.optionsMarket = await safe("選擇權未平倉", fetchOptionsMarket);
+    raw.chipTrend = await safe("籌碼面趨勢判讀", () => classifyChipTrend(raw));
+  }
 
   await writeFile(DATA_PATH, JSON.stringify(raw), "utf8");
-  console.log("已更新 marginTrading / soxIndex / taiexIndex / taifexNightClose / institutionalNet / exDividend / optionsMarket / chipTrend");
+  console.log(skipMarketContext
+    ? "已更新 taifexNightClose（籌碼面/大盤指數本次略過）"
+    : "已更新 marginTrading / soxIndex / taiexIndex / taifexNightClose / institutionalNet / exDividend / optionsMarket / chipTrend");
 }
 
 main().catch((e) => {

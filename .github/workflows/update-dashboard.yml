@@ -31,8 +31,21 @@ jobs:
       # 這個step要排在merge-and-classify.mjs之前：merge-and-classify.mjs的開盤價機率預估
       # 四變數模型要用「今天」的d.taifexNightClose(TX夜盤變動%)當即時輸入，這裡先跑完
       # 才能確保讀到的是今天剛更新的值，不是還沒更新的昨天舊值。
+      #
+      # 跟下面merge-and-classify.mjs同一套鎖定時間窗(手動觸發+13:30~隔日08:00)，理由見
+      # 下面那個step的註解——「籌碼面與大盤指數」卡片這幾個欄位(SOX/TAIEX/三大法人/融資
+      # 融券/選擇權未平倉/籌碼面研判)其實本身不像盤前預測有自我矛盾的問題，這裡鎖定純粹是
+      # 為了讓使用者在鎖定時間窗內看到的卡片行為一致。台指期夜盤(taifexNightClose)不受
+      # 影響，鎖定期間依然照常更新。
       - name: Fetch margin trading / SOX+TAIEX / ex-dividend / options open interest
-        run: node scripts/fetch-market-context.mjs
+        run: |
+          HOURMIN=$((10#$(TZ=Asia/Taipei date +%H%M)))
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && { [ "$HOURMIN" -ge 1330 ] || [ "$HOURMIN" -lt 800 ]; }; then
+            echo "手動觸發且落在鎖定時間窗(13:30~隔日08:00)內，籌碼面/大盤指數維持上一次的值，只更新夜盤資料"
+            node scripts/fetch-market-context.mjs --skip-market-context
+          else
+            node scripts/fetch-market-context.mjs
+          fi
 
       # 「盤前股價預測」「ADR歷史相近價位類比估計」這兩張卡片的意義是「用隔夜資訊，預測
       # 當天開盤缺口」，06:00排程跑完之後當天的預測就該定案，不該因為使用者手動補跑

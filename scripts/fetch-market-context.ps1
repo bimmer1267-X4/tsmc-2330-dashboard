@@ -9,6 +9,9 @@
   每段資料來源獨立 try/catch，單一來源失敗不影響其他欄位，邏輯與
   fetch-market-context.mjs 對等。
 #>
+param(
+    [switch]$SkipMarketContext
+)
 
 $ErrorActionPreference = "Stop"
 $StockNo = "2330"
@@ -335,16 +338,31 @@ function Invoke-Safe($label, [scriptblock]$fn) {
 
 $raw = Get-Content $DataPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
-$raw | Add-Member -MemberType NoteProperty -Name "marginTrading" -Value (Invoke-Safe "融資融券餘額" { Get-MarginTrading }) -Force
-$raw | Add-Member -MemberType NoteProperty -Name "soxIndex" -Value (Invoke-Safe "SOX指數" { Get-YahooIndex "^SOX" }) -Force
-$raw | Add-Member -MemberType NoteProperty -Name "taiexIndex" -Value (Invoke-Safe "TAIEX指數" { Get-YahooIndex "^TWII" }) -Force
+# -SkipMarketContext：跟merge-and-classify.ps1的-BackfillOnly同一套鎖定時間窗邏輯
+# (見update-dashboard.yml)，手動觸發且落在鎖定時間窗內時使用。台指期夜盤
+# (taifexNightClose)不受這個旗標影響，鎖定期間依然照常更新。
+if (-not $SkipMarketContext) {
+    $raw | Add-Member -MemberType NoteProperty -Name "marginTrading" -Value (Invoke-Safe "融資融券餘額" { Get-MarginTrading }) -Force
+    $raw | Add-Member -MemberType NoteProperty -Name "soxIndex" -Value (Invoke-Safe "SOX指數" { Get-YahooIndex "^SOX" }) -Force
+    $raw | Add-Member -MemberType NoteProperty -Name "taiexIndex" -Value (Invoke-Safe "TAIEX指數" { Get-YahooIndex "^TWII" }) -Force
+} else {
+    Write-Host "手動觸發且落在鎖定時間窗內，籌碼面/大盤指數維持上一次的值，只更新夜盤資料"
+}
+
 $previousTaifexNightClose = $raw.taifexNightClose
 $raw | Add-Member -MemberType NoteProperty -Name "taifexNightClose" -Value (Invoke-Safe "台指期夜盤收盤" { Get-TaifexNightClose $previousTaifexNightClose }) -Force
 Invoke-Safe "台指期夜盤歷史紀錄累積" { Update-TaifexNightHistory $previousTaifexNightClose $raw.taifexNightClose } | Out-Null
-$raw | Add-Member -MemberType NoteProperty -Name "institutionalNet" -Value (Invoke-Safe "三大法人買賣超" { Get-InstitutionalNet $raw.daily }) -Force
-$raw | Add-Member -MemberType NoteProperty -Name "exDividend" -Value (Invoke-Safe "除權息預告" { Get-ExDividend }) -Force
-$raw | Add-Member -MemberType NoteProperty -Name "optionsMarket" -Value (Invoke-Safe "選擇權未平倉" { Get-OptionsMarket }) -Force
-$raw | Add-Member -MemberType NoteProperty -Name "chipTrend" -Value (Invoke-Safe "籌碼面趨勢判讀" { Get-ChipTrend $raw }) -Force
+
+if (-not $SkipMarketContext) {
+    $raw | Add-Member -MemberType NoteProperty -Name "institutionalNet" -Value (Invoke-Safe "三大法人買賣超" { Get-InstitutionalNet $raw.daily }) -Force
+    $raw | Add-Member -MemberType NoteProperty -Name "exDividend" -Value (Invoke-Safe "除權息預告" { Get-ExDividend }) -Force
+    $raw | Add-Member -MemberType NoteProperty -Name "optionsMarket" -Value (Invoke-Safe "選擇權未平倉" { Get-OptionsMarket }) -Force
+    $raw | Add-Member -MemberType NoteProperty -Name "chipTrend" -Value (Invoke-Safe "籌碼面趨勢判讀" { Get-ChipTrend $raw }) -Force
+}
 
 $raw | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $DataPath -Encoding utf8
-Write-Host "已更新 marginTrading / soxIndex / taiexIndex / taifexNightClose / institutionalNet / exDividend / optionsMarket / chipTrend"
+if ($SkipMarketContext) {
+    Write-Host "已更新 taifexNightClose（籌碼面/大盤指數本次略過）"
+} else {
+    Write-Host "已更新 marginTrading / soxIndex / taiexIndex / taifexNightClose / institutionalNet / exDividend / optionsMarket / chipTrend"
+}

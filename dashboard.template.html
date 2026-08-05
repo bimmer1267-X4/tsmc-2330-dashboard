@@ -151,7 +151,8 @@
     <div style="font-weight:600;">籌碼面與大盤指數 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
     <a href="chip-analysis.html" id="chip-analysis-link" style="font-size:13px; color:var(--up); text-decoration:none; cursor:pointer; white-space:nowrap;">📊 查看AI籌碼面分析摘要 →</a>
   </div>
-  <div class="sub">三大法人買賣超、融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
+  <div class="sub" id="market-context-sub">三大法人買賣超、融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
+  <div class="sub" id="market-context-freshness" style="margin-top:-10px; font-size:12px; color:var(--muted);"></div>
   <div class="trend-summary" id="market-context-summary"></div>
   <div class="metrics" id="market-context-grid"></div>
 </div>
@@ -469,6 +470,24 @@
       mc.push(['近期除權息', '近期無安排']);
     }
     renderMetricsGrid('market-context-grid', mc);
+
+    // 資料新鮮度說明：這張卡混合了「TWSE/TAIFEX單日公告一次」的EOD資料（三大法人/
+    // 融資融券/選擇權未平倉）跟「即時跳動」的SOX/加權指數，兩種新鮮度不一樣，各自
+    // 標示才不會讓人誤以為整張卡是同一個時間點的資料。任一半缺值就整段跳過。
+    const freshnessEl = document.getElementById('market-context-freshness');
+    const eodDate = (raw.institutionalNet && raw.institutionalNet.date) || (raw.optionsMarket && raw.optionsMarket.date) || null;
+    const liveIso = (raw.soxIndex && raw.soxIndex.quoteTime) || (raw.taiexIndex && raw.taiexIndex.quoteTime) || null;
+    const parts = [];
+    if (eodDate) {
+      const [, mo, da] = eodDate.split('-');
+      parts.push('籌碼面資料：' + Number(mo) + '月' + Number(da) + '日（TWSE/TAIFEX公告）');
+    }
+    if (liveIso) {
+      const taipei = new Date(new Date(liveIso).getTime() + 8 * 3600 * 1000);
+      const pad = (n) => String(n).padStart(2, '0');
+      parts.push('SOX/加權指數：' + pad(taipei.getUTCHours()) + ':' + pad(taipei.getUTCMinutes()) + ' 即時');
+    }
+    freshnessEl.textContent = parts.join('｜');
   })();
 
   // ---- 盤前股價預測 ----
