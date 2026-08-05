@@ -208,8 +208,12 @@ function Select-LatestNightRow($Rows) {
 
 # openapi.taifex.com.tw僅提供「最新一個交易日」、futDataDown則是依日期範圍查詢，沒辦法
 # 直接跟API要前一天的收盤價來算漲跌%。改成把上一次寫進data.json的taifexNightClose當作
-# 前一天的基準，跟這次新抓到的比較。如果兩次的date相同(例如太早觸發、當天夜盤還沒收)，
-# 代表資料還沒真的往前推進，不能拿來算漲跌%，changePct留null。
+# 前一天的基準，跟這次新抓到的比較；date有變才代表換到新一場夜盤，重新計算漲跌%。
+#
+# date沒變(還是同一場夜盤，例如同一天內這個workflow被手動重複觸發、或renew-2330這種
+# 補跑)時，不能拿「這場」跟「自己」比出漲跌%——但也不能就此把changePct/changePts重置
+# 成null，否則每次手動補跑都會把稍早已經算好的漲跌%洗掉。date沒變時保留$Previous裡
+# 原本的值，跟Update-TaifexNightClose(校正同一場夜盤時保留changePct不變)行為一致。
 function Get-TaifexNightClose($Previous) {
     $nowTaipei = (Get-Date).ToUniversalTime().AddHours(8)
     $endStr = $nowTaipei.ToString("yyyy/MM/dd")
@@ -222,9 +226,14 @@ function Get-TaifexNightClose($Previous) {
     if (-not $close) { throw "TX盤後資料找到但無法解析收盤價欄位，原始資料=$($row | ConvertTo-Json -Compress)" }
     $isoDate = $row.date -replace "/", "-"
     $changePct = $null; $changePts = $null
-    if ($Previous -and $Previous.close -and $Previous.date -and $isoDate -and $Previous.date -ne $isoDate) {
-        $changePct = [math]::Round((($close / $Previous.close) - 1) * 100, 2)
-        $changePts = [math]::Round($close - $Previous.close, 2)
+    if ($Previous -and $Previous.close -and $Previous.date -and $isoDate) {
+        if ($Previous.date -ne $isoDate) {
+            $changePct = [math]::Round((($close / $Previous.close) - 1) * 100, 2)
+            $changePts = [math]::Round($close - $Previous.close, 2)
+        } else {
+            $changePct = $Previous.changePct
+            $changePts = $Previous.changePts
+        }
     }
     return [PSCustomObject]@{
         contractMonth = $row.contractMonth; close = $close; changePct = $changePct; changePts = $changePts

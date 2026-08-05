@@ -228,8 +228,16 @@ function taipeiDateStr(d) {
 
 // openapi.taifex.com.tw僅提供「最新一個交易日」、futDataDown則是依日期範圍查詢，沒辦法
 // 直接跟API要前一天的收盤價來算漲跌%。改成把上一次寫進data.json的taifexNightClose當作
-// 前一天的基準，跟這次新抓到的比較；date沒變就代表還是同一場夜盤(校正)，不能拿來算
-// 漲跌%(會變成拿同一天跟自己比較)，直接把changePct留null。
+// 前一天的基準，跟這次新抓到的比較；date有變才代表換到新一場夜盤，重新計算漲跌%。
+//
+// date沒變(還是同一場夜盤，例如同一天內這個workflow被手動重複觸發、或/renew-2330這種
+// 補跑)的情況，不能拿「這場」跟「自己」比出漲跌%——但也不能就此把changePct/changePts
+// 重置成null：這個函式理論上只在每天06:00跑一次，但實務上會被手動repeat(renew-2330
+// skill本來就設計成「可以隨時重複觸發、安全無副作用」)，如果date沒變就重置成null，
+// 會把稍早已經正確算出來的漲跌%洗掉，等於每次手動補跑都會讓「收盤價旁邊的漲跌點數」
+// 消失，卡片看起來像壞掉一樣。所以date沒變時要保留previous裡原本算好的值，這裡的行為
+// 才會跟fetch-live-quote.mjs的refreshTaifexNightClose(校正同一場夜盤時保留changePct
+// 不變)一致。
 async function fetchTaifexNightClose(previous) {
   // 查近5個日曆天(涵蓋連假造成的交易日空隙)到今天，確保一定抓得到「範圍內最新一筆」。
   const now = new Date();
@@ -242,9 +250,14 @@ async function fetchTaifexNightClose(previous) {
   if (close == null) throw new Error(`TX盤後資料找到但無法解析收盤價欄位，原始資料=${JSON.stringify(row)}`);
   const date = row.date.replace(/\//g, "-");
   let changePct = null, changePts = null;
-  if (previous && previous.close != null && previous.date && date && previous.date !== date) {
-    changePct = Math.round((close / previous.close - 1) * 10000) / 100;
-    changePts = Math.round((close - previous.close) * 100) / 100;
+  if (previous && previous.close != null && previous.date && date) {
+    if (previous.date !== date) {
+      changePct = Math.round((close / previous.close - 1) * 10000) / 100;
+      changePts = Math.round((close - previous.close) * 100) / 100;
+    } else {
+      changePct = previous.changePct ?? null;
+      changePts = previous.changePts ?? null;
+    }
   }
   return {
     contractMonth: row.contractMonth || null,

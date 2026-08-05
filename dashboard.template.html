@@ -802,9 +802,13 @@
     const deltaEl = document.getElementById('taifex-night-delta');
     // changePts/changePct在「今天剛好是新的一場、還沒有前一場可以比」時會是null（理論上
     // 只有歷史序列完全是空的最初期間才會發生），這裡讓delta整行留白而不是顯示"null"字樣。
+    // 顏色刻意不用共用的.delta.up/.delta.down class——那組是給股價相關卡片用的美式配色
+    // (漲=綠/跌=紅)，這張卡片跟夜盤K線圖、成交量副圖一樣採台灣慣例(漲=紅/跌=綠)，直接
+    // 設inline color跟K線圖的--critical(紅)/--good(綠)保持一致，不去動共用class本身。
     if (t.changePts != null && t.changePct != null) {
       deltaEl.textContent = (t.changePts>=0?'+':'') + fmt(t.changePts,0) + ' (' + (t.changePct>=0?'+':'') + fmt(t.changePct,2) + '%)';
-      deltaEl.className = 'delta ' + (t.changePts>=0?'up':'down');
+      deltaEl.className = 'delta';
+      deltaEl.style.color = t.changePts >= 0 ? 'var(--critical)' : 'var(--good)';
     } else {
       deltaEl.textContent = '';
     }
