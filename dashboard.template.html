@@ -849,7 +849,10 @@
     bars.forEach((b,i) => {
       const cx = x2(i);
       const up = b.close >= b.open;
-      const color = up ? 'var(--up)' : 'var(--down)';
+      // 台股慣例配色：漲紅、跌綠（跟--up/--down這兩個變數字面上的名字剛好相反，那兩個是
+      // 主K線圖沿用的美式配色，這裡改用--critical(紅)/--good(綠)這兩個既有的主題色變數，
+      // 兩者本身就有支援亮/暗色模式，不用另外定義新變數）。
+      const color = up ? 'var(--critical)' : 'var(--good)';
       svg2.appendChild(el('line', {x1:cx,x2:cx,y1:y2(b.high),y2:y2(b.low), stroke:color, 'stroke-width':1}));
       const bodyTop = y2(Math.max(b.open,b.close)), bodyBot = y2(Math.min(b.open,b.close));
       svg2.appendChild(el('rect', {x:cx-candleW/2, y:bodyTop, width:candleW, height:Math.max(1,bodyBot-bodyTop), fill:color}));
