@@ -977,6 +977,17 @@
         vChg.textContent = (chgPts>=0?'+':'') + fmt(chgPts,0) + ' (' + (chgPct>=0?'+':'') + fmt(chgPct,2) + '%)';
         rowChg.appendChild(kChg); rowChg.appendChild(vChg); tooltip2.appendChild(rowChg);
       }
+
+      const r2 = ind2[i];
+      [['MA5', r2.ma5, 'var(--ma5)'], ['MA20', r2.ma20, 'var(--ma20)'], ['MA60', r2.ma60, 'var(--ma60)']].forEach(([k,v,color])=>{
+        if (v == null) return; // 暖機期還沒有值(例如MA60要累積60筆才有)，直接跳過不顯示這行
+        const row = document.createElement('div'); row.className='t-row';
+        const kEl = document.createElement('span'); kEl.className='k';
+        const swatch = document.createElement('span'); swatch.className='tkey'; swatch.style.background=color; kEl.appendChild(swatch);
+        const kt = document.createElement('span'); kt.textContent = k; kEl.appendChild(kt);
+        const vEl = document.createElement('span'); vEl.className='v'; vEl.textContent = fmt(v,0);
+        row.appendChild(kEl); row.appendChild(vEl); tooltip2.appendChild(row);
+      });
     });
     svg2.addEventListener('pointerleave', () => { tooltip2.style.display='none'; crosshair2.setAttribute('visibility','hidden'); });
 
