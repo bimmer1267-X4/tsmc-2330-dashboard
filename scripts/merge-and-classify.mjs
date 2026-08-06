@@ -914,8 +914,8 @@ function buildOpenGapModelV3(adrSeries, fxSeries, twDaily, premiumHistory, rollW
 // D」代表的是D當天15:00開始、D+1 05:00收盤的那一場，跟ADR一樣屬於「隔夜到隔天開盤前
 // 才知道結果」的輸入，用同一套「找第一個date>D的twDaily」對齊法（不是同一天，是D+1）。
 // txNightHistory: [{date, close, changePct}]（date=TAIFEX官方夜盤標示的起始日D，
-// changePct=這場夜盤收盤 vs 前一個交易日夜盤收盤的漲跌%，來源見fetchTaifexNightClose/
-// refreshTaifexNightClose，兩者定義一致，可以直接沿用不用重算）。
+// changePct=這場夜盤收盤 vs 前一個交易日夜盤收盤的漲跌%，來源見fetchTaifexNightClose，
+// 可以直接沿用不用重算）。
 function buildOpenGapModelV4(adrSeries, fxSeries, twDaily, premiumHistory, txNightHistory, rollWindowDays) {
   const adrMap = new Map(adrSeries.map((s) => [s.date, s.close]));
   const adrDates = adrSeries.map((s) => s.date);

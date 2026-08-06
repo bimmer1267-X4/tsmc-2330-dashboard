@@ -235,9 +235,7 @@ function taipeiDateStr(d) {
 // 重置成null：這個函式理論上只在每天06:00跑一次，但實務上會被手動repeat(renew-2330
 // skill本來就設計成「可以隨時重複觸發、安全無副作用」)，如果date沒變就重置成null，
 // 會把稍早已經正確算出來的漲跌%洗掉，等於每次手動補跑都會讓「收盤價旁邊的漲跌點數」
-// 消失，卡片看起來像壞掉一樣。所以date沒變時要保留previous裡原本算好的值，這裡的行為
-// 才會跟fetch-live-quote.mjs的refreshTaifexNightClose(校正同一場夜盤時保留changePct
-// 不變)一致。
+// 消失，卡片看起來像壞掉一樣。所以date沒變時要保留previous裡原本算好的值。
 async function fetchTaifexNightClose(previous) {
   // 查近5個日曆天(涵蓋連假造成的交易日空隙)到今天，確保一定抓得到「範圍內最新一筆」。
   const now = new Date();

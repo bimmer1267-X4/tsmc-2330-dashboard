@@ -216,7 +216,7 @@ function Select-LatestNightRow($Rows) {
 # date沒變(還是同一場夜盤，例如同一天內這個workflow被手動重複觸發、或renew-2330這種
 # 補跑)時，不能拿「這場」跟「自己」比出漲跌%——但也不能就此把changePct/changePts重置
 # 成null，否則每次手動補跑都會把稍早已經算好的漲跌%洗掉。date沒變時保留$Previous裡
-# 原本的值，跟Update-TaifexNightClose(校正同一場夜盤時保留changePct不變)行為一致。
+# 原本的值。
 function Get-TaifexNightClose($Previous) {
     $nowTaipei = (Get-Date).ToUniversalTime().AddHours(8)
     $endStr = $nowTaipei.ToString("yyyy/MM/dd")
