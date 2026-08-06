@@ -261,6 +261,13 @@
   <div class="src">＊占比為2026年初財經媒體整理之參考數字，僅供了解「含積量」概念，非即時數據；ETF成分股權重會隨台積電股價與基金每月／每季調整持股而變動，實際占比請以各基金公司官網最新月報為準，本表不構成投資建議。</div>
 </div>
 
+<div class="card" id="technical-signal-card">
+  <div style="font-weight:600; margin-bottom:2px;">技術面買賣訊號 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
+  <div class="sub">依均線排列、MACD柱狀體、RSI相對50中軸、KD交叉方向加權計分判讀多空；估值面(PE/ADR溢價)不參與計分，另見「全年預估EPS估值」卡片的估值分區獨立顯示</div>
+  <div class="trend-summary" id="technical-signal-summary"></div>
+  <div class="metrics" id="technical-signal-levels"></div>
+</div>
+
 <div class="card">
   <div style="font-weight:600; margin-bottom:6px;">近6個月K線圖（MA5/20/60、布林通道） <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
   <div class="legend" id="price-legend"></div>
@@ -488,6 +495,29 @@
       parts.push('SOX/加權指數：' + pad(taipei.getUTCHours()) + ':' + pad(taipei.getUTCMinutes()) + ' 即時');
     }
     freshnessEl.textContent = parts.join('｜');
+  })();
+
+  // ---- 技術面買賣訊號（估值面PE/ADR溢價不參與計分，跟estimation卡片的估值分區獨立顯示）----
+  (function(){
+    const sig = raw.technicalSignal;
+    const card = document.getElementById('technical-signal-card');
+    if (!sig) { if (card) card.style.display = 'none'; return; }
+
+    const summaryEl = document.getElementById('technical-signal-summary');
+    summaryEl.style.display = 'block';
+    summaryEl.className = 'trend-summary' + (sig.cls ? ' ' + sig.cls : '');
+    let html = '<div class="verdict">技術面綜合研判：' + sig.verdict + '</div>';
+    if (sig.reasons.length) html += '<div class="reasons">' + sig.reasons.join('、') + '</div>';
+    if (sig.risk.length) html += '<div class="risk">⚠ ' + sig.risk.join('；') + '</div>';
+    html += '<div class="reasons" style="margin-top:6px; font-size:11px;">＊規則式統計摘要，非投資建議，僅供參考</div>';
+    summaryEl.innerHTML = html;
+
+    renderMetricsGrid('technical-signal-levels', [
+      ['支撐價', fmt(sig.levels.support,0)+' 元'],
+      ['壓力價', fmt(sig.levels.resistance,0)+' 元'],
+      ['停損參考價', fmt(sig.levels.stopLoss,0)+' 元'],
+      ['停利參考價', fmt(sig.levels.takeProfit,0)+' 元'],
+    ]);
   })();
 
   // ---- 盤前股價預測 ----

@@ -1124,6 +1124,92 @@ function Get-ZoneClassification($pe, $rsi, $premiumPct, $atSixMonthHigh, $nearBb
     return [PSCustomObject]@{ zone = $zone; reasons = $reasons }
 }
 
+# 技術面買賣訊號（估值面PE/ADR溢價不參與計分，跟Get-ZoneClassification刻意分開兩套獨立
+# 判讀）：均線排列/MACD柱狀體/RSI相對50中軸/KD交叉方向四個因子加權計分，公式與門檻比照
+# fetch-market-context.ps1裡的Get-ChipTrend（籌碼面綜合研判）——
+# avg=Σ(score×weight)/Σweight，avg≥0.34偏多、avg≤-0.34偏空、其餘中性。另外附帶一組不
+# 計分的風險/提醒清單，以及支撐/壓力/停損/停利參考價位。
+function Get-TechnicalSignal($daily, $lastInd, $lastClose, $sixMonthHigh) {
+    $score = 0.0
+    $weightSum = 0.0
+    $reasons = @()
+    $risk = @()
+
+    # 均線排列
+    if ($lastInd.ma5 -ne $null -and $lastInd.ma20 -ne $null -and $lastInd.ma60 -ne $null) {
+        $s = 0
+        if ($lastInd.ma5 -gt $lastInd.ma20 -and $lastInd.ma20 -gt $lastInd.ma60) { $s = 1 }
+        elseif ($lastInd.ma5 -lt $lastInd.ma20 -and $lastInd.ma20 -lt $lastInd.ma60) { $s = -1 }
+        $score += $s * 1.2; $weightSum += 1.2
+        $reasons += if ($s -gt 0) { "均線呈多頭排列(MA5>MA20>MA60)" } elseif ($s -lt 0) { "均線呈空頭排列(MA5<MA20<MA60)" } else { "均線糾結，未成排列" }
+    }
+
+    # MACD柱狀體方向
+    if ($lastInd.histogram -ne $null) {
+        $s = [math]::Sign($lastInd.histogram)
+        $score += $s * 1.0; $weightSum += 1.0
+        $note = if ($lastInd.macd -ne $null -and $lastInd.macd -lt 0 -and $s -gt 0) { "（柱狀體翻正但仍在0軸下，屬初升段訊號）" } else { "" }
+        $reasons += "MACD柱狀體$(if ($s -ge 0) { '翻正' } else { '翻負' })$note"
+    }
+
+    # RSI相對50中軸
+    if ($lastInd.rsi14 -ne $null) {
+        $s = [math]::Sign($lastInd.rsi14 - 50)
+        $score += $s * 0.8; $weightSum += 0.8
+        $reasons += "RSI(14) $([math]::Round($lastInd.rsi14,1)) $(if ($s -ge 0) { '站上' } else { '跌破' })50中軸"
+    }
+
+    # KD交叉方向
+    if ($lastInd.k -ne $null -and $lastInd.d -ne $null) {
+        $s = [math]::Sign($lastInd.k - $lastInd.d)
+        $score += $s * 0.6; $weightSum += 0.6
+        $reasons += if ($s -gt 0) { "KD 黃金交叉(K>D)" } elseif ($s -lt 0) { "KD 死亡交叉(K<D)" } else { "KD K=D" }
+    }
+
+    # 獨立風險/提醒（不計分）
+    if ($lastInd.rsi14 -ne $null) {
+        if ($lastInd.rsi14 -gt 70) { $risk += "RSI超買，留意短線拉回風險" }
+        elseif ($lastInd.rsi14 -lt 30) { $risk += "RSI超賣，留意反彈契機" }
+    }
+    if ($lastInd.k -ne $null) {
+        if ($lastInd.k -gt 80) { $risk += "KD高檔鈍化，留意過熱拉回風險" }
+        elseif ($lastInd.k -lt 20) { $risk += "KD低檔鈍化，留意超跌反彈契機" }
+    }
+    if ($lastInd.bbUpper -ne $null -and $lastInd.bbLower -ne $null -and $lastInd.bbUpper -gt $lastInd.bbLower) {
+        $pos = ($lastClose - $lastInd.bbLower) / ($lastInd.bbUpper - $lastInd.bbLower)
+        if ($pos -ge 0.9) { $risk += "股價貼近布林上軌，短線過熱疑慮" }
+        elseif ($pos -le 0.1) { $risk += "股價貼近布林下軌，具超跌支撐性質" }
+    }
+    # 量價背離：近5日新高/新低 + 量能跟前5日均量比較
+    if ($daily.Count -ge 10) {
+        $recent5 = $daily | Select-Object -Last 5
+        $prev5 = $daily | Select-Object -Last 10 | Select-Object -First 5
+        $prevAvgVol = ($prev5 | Measure-Object -Property volume -Average).Average
+        $todayClose = $daily[-1].close
+        $todayVol = $daily[-1].volume
+        $recent5HighClose = ($recent5 | Measure-Object -Property close -Maximum).Maximum
+        $recent5LowClose = ($recent5 | Measure-Object -Property close -Minimum).Minimum
+        if ($todayClose -ge $recent5HighClose -and $todayVol -lt $prevAvgVol) { $risk += "價漲量縮，動能背離值得留意" }
+        elseif ($todayClose -le $recent5LowClose -and $todayVol -gt $prevAvgVol) { $risk += "價跌量增，賣壓沉重" }
+    }
+
+    if ($weightSum -eq 0) { return $null }
+    $avg = $score / $weightSum
+    $verdict = if ($avg -ge 0.34) { "偏多" } elseif ($avg -le -0.34) { "偏空" } else { "中性" }
+    $cls = if ($avg -ge 0.34) { "up" } elseif ($avg -le -0.34) { "down" } else { "" }
+
+    $support = if ($lastInd.ma60 -ne $null -and $lastInd.bbLower -ne $null) { [math]::Max($lastInd.ma60, $lastInd.bbLower) } elseif ($lastInd.ma60 -ne $null) { $lastInd.ma60 } else { $lastInd.bbLower }
+    $resistance = if ($lastInd.bbUpper -ne $null) { [math]::Min($sixMonthHigh, $lastInd.bbUpper) } else { $sixMonthHigh }
+
+    return [PSCustomObject]@{
+        verdict = $verdict; cls = $cls; reasons = $reasons; risk = $risk
+        levels = [PSCustomObject]@{
+            support = [math]::Round($support, 0); resistance = [math]::Round($resistance, 0)
+            stopLoss = [math]::Round($support, 0); takeProfit = [math]::Round($resistance, 0)
+        }
+    }
+}
+
 $pe = $d.valuation.peRatio
 $rsi = $d.latestRsi
 $lastInd = $d.indicators[-1]
@@ -1154,6 +1240,7 @@ $d | Add-Member -NotePropertyName zoneThresholds -NotePropertyValue $zoneThresho
 $d | Add-Member -NotePropertyName technicalFlags -NotePropertyValue ([PSCustomObject]@{
     rsi14 = $rsi; premiumPct = $premiumPct; atSixMonthHigh = $atSixMonthHigh; nearBbLower = $nearBbLower; nearMa60 = $nearMa60
 }) -Force
+$d | Add-Member -NotePropertyName technicalSignal -NotePropertyValue (Get-TechnicalSignal $d.daily $lastInd $lastClose $sixMonthHigh) -Force
 
 # ---- 官方全年預估EPS（來自 config.json，可請Claude更新） ----
 $configPath = Join-Path $PSScriptRoot "..\data\config.json"

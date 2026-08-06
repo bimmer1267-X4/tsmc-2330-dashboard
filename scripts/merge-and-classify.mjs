@@ -1005,6 +1005,88 @@ function classifyZone(pe, rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60
   return { zone, reasons };
 }
 
+// 技術面買賣訊號（估值面PE/ADR溢價不參與計分，跟classifyZone刻意分開兩套獨立判讀）：
+// 均線排列/MACD柱狀體/RSI相對50中軸/KD交叉方向四個因子加權計分，公式與門檻比照
+// fetch-market-context.mjs裡的classifyChipTrend（籌碼面綜合研判）——
+// avg=Σ(score×weight)/Σweight，avg≥0.34偏多、avg≤-0.34偏空、其餘中性。另外附帶
+// 一組不計分的風險/提醒清單，以及支撐/壓力/停損/停利參考價位。
+function classifyTechnicalSignal(daily, lastInd, lastClose, sixMonthHigh) {
+  let score = 0, weightSum = 0;
+  const reasons = [];
+  const risk = [];
+
+  // 均線排列
+  if (lastInd.ma5 != null && lastInd.ma20 != null && lastInd.ma60 != null) {
+    let s = 0;
+    if (lastInd.ma5 > lastInd.ma20 && lastInd.ma20 > lastInd.ma60) s = 1;
+    else if (lastInd.ma5 < lastInd.ma20 && lastInd.ma20 < lastInd.ma60) s = -1;
+    score += s * 1.2; weightSum += 1.2;
+    reasons.push(s > 0 ? "均線呈多頭排列(MA5>MA20>MA60)" : s < 0 ? "均線呈空頭排列(MA5<MA20<MA60)" : "均線糾結，未成排列");
+  }
+
+  // MACD柱狀體方向
+  if (lastInd.histogram != null) {
+    const s = Math.sign(lastInd.histogram);
+    score += s * 1.0; weightSum += 1.0;
+    const note = lastInd.macd != null && lastInd.macd < 0 && s > 0 ? "（柱狀體翻正但仍在0軸下，屬初升段訊號）" : "";
+    reasons.push(`MACD柱狀體${s >= 0 ? "翻正" : "翻負"}${note}`);
+  }
+
+  // RSI相對50中軸
+  if (lastInd.rsi14 != null) {
+    const s = Math.sign(lastInd.rsi14 - 50);
+    score += s * 0.8; weightSum += 0.8;
+    reasons.push(`RSI(14) ${lastInd.rsi14.toFixed(1)} ${s >= 0 ? "站上" : "跌破"}50中軸`);
+  }
+
+  // KD交叉方向
+  if (lastInd.k != null && lastInd.d != null) {
+    const s = Math.sign(lastInd.k - lastInd.d);
+    score += s * 0.6; weightSum += 0.6;
+    reasons.push(`KD ${s > 0 ? "黃金交叉(K>D)" : s < 0 ? "死亡交叉(K<D)" : "K=D"}`);
+  }
+
+  // 獨立風險/提醒（不計分）
+  if (lastInd.rsi14 != null) {
+    if (lastInd.rsi14 > 70) risk.push("RSI超買，留意短線拉回風險");
+    else if (lastInd.rsi14 < 30) risk.push("RSI超賣，留意反彈契機");
+  }
+  if (lastInd.k != null) {
+    if (lastInd.k > 80) risk.push("KD高檔鈍化，留意過熱拉回風險");
+    else if (lastInd.k < 20) risk.push("KD低檔鈍化，留意超跌反彈契機");
+  }
+  if (lastInd.bbUpper != null && lastInd.bbLower != null && lastInd.bbUpper > lastInd.bbLower) {
+    const pos = (lastClose - lastInd.bbLower) / (lastInd.bbUpper - lastInd.bbLower);
+    if (pos >= 0.9) risk.push("股價貼近布林上軌，短線過熱疑慮");
+    else if (pos <= 0.1) risk.push("股價貼近布林下軌，具超跌支撐性質");
+  }
+  // 量價背離：近5日新高/新低 + 量能跟前5日均量比較
+  if (daily.length >= 10) {
+    const recent5 = daily.slice(-5);
+    const prev5 = daily.slice(-10, -5);
+    const prevAvgVol = prev5.reduce((a, b) => a + b.volume, 0) / prev5.length;
+    const todayClose = daily[daily.length - 1].close;
+    const todayVol = daily[daily.length - 1].volume;
+    const recent5HighClose = Math.max(...recent5.map((d) => d.close));
+    const recent5LowClose = Math.min(...recent5.map((d) => d.close));
+    if (todayClose >= recent5HighClose && todayVol < prevAvgVol) risk.push("價漲量縮，動能背離值得留意");
+    else if (todayClose <= recent5LowClose && todayVol > prevAvgVol) risk.push("價跌量增，賣壓沉重");
+  }
+
+  if (weightSum === 0) return null;
+  const avg = score / weightSum;
+  const verdict = avg >= 0.34 ? "偏多" : avg <= -0.34 ? "偏空" : "中性";
+  const cls = avg >= 0.34 ? "up" : avg <= -0.34 ? "down" : "";
+
+  const support = lastInd.ma60 != null && lastInd.bbLower != null ? Math.max(lastInd.ma60, lastInd.bbLower) : (lastInd.ma60 ?? lastInd.bbLower ?? null);
+  const resistance = lastInd.bbUpper != null ? Math.min(sixMonthHigh, lastInd.bbUpper) : sixMonthHigh;
+
+  return {
+    verdict, cls, reasons, risk,
+    levels: { support: round(support, 0), resistance: round(resistance, 0), stopLoss: round(support, 0), takeProfit: round(resistance, 0) },
+  };
+}
+
 // 收盤後回填模式（--backfill-only）：台股收盤後(13:35)立刻用當天剛收盤的台股日K，回填
 // 「盤前股價預測準確度歷史追蹤」卡片裡今天早上那筆還沒解析的預測(actual補上開盤/收盤/
 // 誤差/走勢命中/CI覆蓋率/Brier分數)，讓卡片不用等到隔天06:00的完整排程才更新。刻意不
@@ -1152,6 +1234,7 @@ async function main() {
   d.valuationReasons = trailing.reasons;
   d.zoneThresholds = zoneThresholds;
   d.technicalFlags = { rsi14: rsi, premiumPct, atSixMonthHigh, nearBbLower, nearMa60 };
+  d.technicalSignal = classifyTechnicalSignal(d.daily, lastInd, lastClose, sixMonthHigh);
 
   // ---- 官方全年預估EPS（來自 config.json，可請Claude更新） ----
   // epsInfo可能因t187ap14_L換季空窗期抓不到而是null(見update-dashboard.mjs的
