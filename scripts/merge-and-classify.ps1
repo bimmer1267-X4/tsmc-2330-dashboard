@@ -975,31 +975,144 @@ function Get-OpenGapModelV4($adrSeries, $fxSeries, $twDaily, $PremiumHistory, $T
     }
 }
 
+# 技術面買賣訊號（估值面PE/ADR溢價不參與計分，跟Get-ZoneClassification刻意分開兩套獨立
+# 判讀）：均線排列/MACD柱狀體/RSI相對50中軸/KD交叉方向四個因子加權計分，公式與門檻比照
+# fetch-market-context.ps1裡的Get-ChipTrend（籌碼面綜合研判）——
+# avg=Σ(score×weight)/Σweight，avg≥0.34偏多、avg≤-0.34偏空、其餘中性。另外附帶一組不
+# 計分的風險/提醒清單，以及支撐/壓力/停損/停利參考價位。
+# （這個函式定義刻意放在-BackfillOnly區塊之前——PowerShell的function要先執行過
+# 才會被登記，不像JS有hoisting，-BackfillOnly區塊裡也需要呼叫它，所以不能放在main
+# 流程那邊的原位置。）
+function Get-TechnicalSignal($daily, $lastInd, $lastClose, $sixMonthHigh) {
+    $score = 0.0
+    $weightSum = 0.0
+    $reasons = @()
+    $risk = @()
+
+    # 均線排列
+    if ($lastInd.ma5 -ne $null -and $lastInd.ma20 -ne $null -and $lastInd.ma60 -ne $null) {
+        $s = 0
+        if ($lastInd.ma5 -gt $lastInd.ma20 -and $lastInd.ma20 -gt $lastInd.ma60) { $s = 1 }
+        elseif ($lastInd.ma5 -lt $lastInd.ma20 -and $lastInd.ma20 -lt $lastInd.ma60) { $s = -1 }
+        $score += $s * 1.2; $weightSum += 1.2
+        $reasons += if ($s -gt 0) { "均線呈多頭排列(MA5>MA20>MA60)" } elseif ($s -lt 0) { "均線呈空頭排列(MA5<MA20<MA60)" } else { "均線糾結，未成排列" }
+    }
+
+    # MACD柱狀體方向
+    if ($lastInd.histogram -ne $null) {
+        $s = [math]::Sign($lastInd.histogram)
+        $score += $s * 1.0; $weightSum += 1.0
+        $note = if ($lastInd.macd -ne $null -and $lastInd.macd -lt 0 -and $s -gt 0) { "（柱狀體翻正但仍在0軸下，屬初升段訊號）" } else { "" }
+        $reasons += "MACD柱狀體$(if ($s -ge 0) { '翻正' } else { '翻負' })$note"
+    }
+
+    # RSI相對50中軸
+    if ($lastInd.rsi14 -ne $null) {
+        $s = [math]::Sign($lastInd.rsi14 - 50)
+        $score += $s * 0.8; $weightSum += 0.8
+        $reasons += "RSI(14) $([math]::Round($lastInd.rsi14,1)) $(if ($s -ge 0) { '站上' } else { '跌破' })50中軸"
+    }
+
+    # KD交叉方向
+    if ($lastInd.k -ne $null -and $lastInd.d -ne $null) {
+        $s = [math]::Sign($lastInd.k - $lastInd.d)
+        $score += $s * 0.6; $weightSum += 0.6
+        $reasons += if ($s -gt 0) { "KD 黃金交叉(K>D)" } elseif ($s -lt 0) { "KD 死亡交叉(K<D)" } else { "KD K=D" }
+    }
+
+    # 獨立風險/提醒（不計分）
+    if ($lastInd.rsi14 -ne $null) {
+        if ($lastInd.rsi14 -gt 70) { $risk += "RSI超買，留意短線拉回風險" }
+        elseif ($lastInd.rsi14 -lt 30) { $risk += "RSI超賣，留意反彈契機" }
+    }
+    if ($lastInd.k -ne $null) {
+        if ($lastInd.k -gt 80) { $risk += "KD高檔鈍化，留意過熱拉回風險" }
+        elseif ($lastInd.k -lt 20) { $risk += "KD低檔鈍化，留意超跌反彈契機" }
+    }
+    if ($lastInd.bbUpper -ne $null -and $lastInd.bbLower -ne $null -and $lastInd.bbUpper -gt $lastInd.bbLower) {
+        $pos = ($lastClose - $lastInd.bbLower) / ($lastInd.bbUpper - $lastInd.bbLower)
+        if ($pos -ge 0.9) { $risk += "股價貼近布林上軌，短線過熱疑慮" }
+        elseif ($pos -le 0.1) { $risk += "股價貼近布林下軌，具超跌支撐性質" }
+    }
+    # 量價背離：近5日新高/新低 + 量能跟前5日均量比較
+    if ($daily.Count -ge 10) {
+        $recent5 = $daily | Select-Object -Last 5
+        $prev5 = $daily | Select-Object -Last 10 | Select-Object -First 5
+        $prevAvgVol = ($prev5 | Measure-Object -Property volume -Average).Average
+        $todayClose = $daily[-1].close
+        $todayVol = $daily[-1].volume
+        $recent5HighClose = ($recent5 | Measure-Object -Property close -Maximum).Maximum
+        $recent5LowClose = ($recent5 | Measure-Object -Property close -Minimum).Minimum
+        if ($todayClose -ge $recent5HighClose -and $todayVol -lt $prevAvgVol) { $risk += "價漲量縮，動能背離值得留意" }
+        elseif ($todayClose -le $recent5LowClose -and $todayVol -gt $prevAvgVol) { $risk += "價跌量增，賣壓沉重" }
+    }
+
+    if ($weightSum -eq 0) { return $null }
+    $avg = $score / $weightSum
+    $verdict = if ($avg -ge 0.34) { "偏多" } elseif ($avg -le -0.34) { "偏空" } else { "中性" }
+    $cls = if ($avg -ge 0.34) { "up" } elseif ($avg -le -0.34) { "down" } else { "" }
+
+    $support = if ($lastInd.ma60 -ne $null -and $lastInd.bbLower -ne $null) { [math]::Max($lastInd.ma60, $lastInd.bbLower) } elseif ($lastInd.ma60 -ne $null) { $lastInd.ma60 } else { $lastInd.bbLower }
+    $resistance = if ($lastInd.bbUpper -ne $null) { [math]::Min($sixMonthHigh, $lastInd.bbUpper) } else { $sixMonthHigh }
+
+    return [PSCustomObject]@{
+        verdict = $verdict; cls = $cls; reasons = $reasons; risk = $risk
+        levels = [PSCustomObject]@{
+            support = [math]::Round($support, 0); resistance = [math]::Round($resistance, 0)
+            stopLoss = [math]::Round($support, 0); takeProfit = [math]::Round($resistance, 0)
+        }
+    }
+}
+
 # 收盤後回填模式(-BackfillOnly)：台股收盤後(13:35)立刻用當天剛收盤的台股日K，回填
 # 「盤前股價預測準確度歷史追蹤」卡片裡今天早上那筆還沒解析的預測(actual補上開盤/收盤/
 # 誤差/走勢命中/CI覆蓋率/Brier分數)，讓卡片不用等到隔天06:00的完整排程才更新。刻意不
 # 傳NewEntry(維持$null)——「明天」的新預測需要ADR/匯率隔夜資料，13:35美股根本還沒開盤，
 # 這部分本來就做不到，維持給隔天06:00那個完整排程處理。同理不重新計算ADR換算價/估值
-# 分區/技術旗標/官方預估這些欄位，只更新predictionAccuracySummary這一個欄位，其餘完全
-# 維持這次讀到的原樣，不會被覆蓋。
+# 分區/官方預估這些欄位，只更新predictionAccuracySummary/taifexNightHistory/
+# technicalSignal這三個欄位，其餘完全維持這次讀到的原樣，不會被覆蓋。
 if ($BackfillOnly) {
     $backfillPath = Join-Path $PSScriptRoot "..\data\data.json"
     $bfD = Get-Content $backfillPath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+    # 夜盤K線圖：同步.mjs版本邏輯，底層檔案本身不受鎖定時間窗影響，這裡只是把它
+    # 重新切6個月子集塞回data.json，讓卡片跟得上已經是最新的底層資料。跟下面近1年
+    # 台股日K(bfTwDaily1y)的抓取完全無關，刻意獨立處理，不被那邊的失敗連累。
+    try {
+        $bfTxNightHistory = Get-Content $TxNightHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $bfD | Add-Member -NotePropertyName taifexNightHistory -NotePropertyValue (Get-RecentMonthsSeries $bfTxNightHistory 6) -Force
+    } catch {
+        # 檔案不存在或格式壞掉，維持原本的taifexNightHistory不變
+    }
+
+    # 技術面買賣訊號：同步.mjs版本邏輯，純規則式計算，$bfD.daily/$bfD.indicators
+    # 在鎖定時間窗內其實已經是update-dashboard.mjs那步剛更新好的新資料，直接拿來
+    # 算。同樣跟bfTwDaily1y無關，獨立處理。
+    if ($bfD.daily -and $bfD.daily.Count -gt 0 -and $bfD.indicators -and $bfD.indicators.Count -gt 0 -and $bfD.valuation) {
+        $bfLastInd = $bfD.indicators[-1]
+        $bfLastClose = $bfD.valuation.closePrice
+        $bfSixMonthHigh = ($bfD.daily | Measure-Object -Property close -Maximum).Maximum
+        $bfD | Add-Member -NotePropertyName technicalSignal -NotePropertyValue (Get-TechnicalSignal $bfD.daily $bfLastInd $bfLastClose $bfSixMonthHigh) -Force
+    }
+
+    # predictionAccuracySummary才需要近1年台股日K，這裡失敗只略過這一項，不影響
+    # 上面兩項已經算好、準備寫入的欄位。
     $bfTwDaily1y = @()
     try {
         $bfTwDaily1y = Get-TwseDailyRange $RegressionWindowMonths
     } catch {
-        Write-Warning "抓取近1年台股日K失敗，略過收盤後回填: $($_.Exception.Message)"
+        Write-Warning "抓取近1年台股日K失敗，略過準確度回填(其餘欄位仍照常更新): $($_.Exception.Message)"
     }
     if ($bfTwDaily1y.Count -gt 0) {
         $bfHistory = Update-PredictionAccuracyHistory $bfTwDaily1y $null
         $bfSummary = Get-PredictionAccuracySummary $bfHistory
         if ($bfSummary) { $bfD | Add-Member -NotePropertyName predictionAccuracySummary -NotePropertyValue $bfSummary -Force }
-        $bfD | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $backfillPath -Encoding utf8
-        Write-Host "已完成收盤後回填(-BackfillOnly模式)，僅更新predictionAccuracySummary，其餘欄位不變。"
     } else {
-        Write-Warning "近1年台股日K為空，略過收盤後回填"
+        Write-Warning "近1年台股日K為空，略過準確度回填(其餘欄位仍照常更新)"
     }
+
+    $bfD | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $backfillPath -Encoding utf8
+    Write-Host "已完成收盤後回填(-BackfillOnly模式)：predictionAccuracySummary/taifexNightHistory/technicalSignal已更新，其餘欄位不變。"
     exit 0
 }
 
@@ -1122,92 +1235,6 @@ function Get-ZoneClassification($pe, $rsi, $premiumPct, $atSixMonthHigh, $nearBb
         $reasons += "$peLabel $pe 倍落在24~28倍區間，未觸發便宜或超貴條件"
     }
     return [PSCustomObject]@{ zone = $zone; reasons = $reasons }
-}
-
-# 技術面買賣訊號（估值面PE/ADR溢價不參與計分，跟Get-ZoneClassification刻意分開兩套獨立
-# 判讀）：均線排列/MACD柱狀體/RSI相對50中軸/KD交叉方向四個因子加權計分，公式與門檻比照
-# fetch-market-context.ps1裡的Get-ChipTrend（籌碼面綜合研判）——
-# avg=Σ(score×weight)/Σweight，avg≥0.34偏多、avg≤-0.34偏空、其餘中性。另外附帶一組不
-# 計分的風險/提醒清單，以及支撐/壓力/停損/停利參考價位。
-function Get-TechnicalSignal($daily, $lastInd, $lastClose, $sixMonthHigh) {
-    $score = 0.0
-    $weightSum = 0.0
-    $reasons = @()
-    $risk = @()
-
-    # 均線排列
-    if ($lastInd.ma5 -ne $null -and $lastInd.ma20 -ne $null -and $lastInd.ma60 -ne $null) {
-        $s = 0
-        if ($lastInd.ma5 -gt $lastInd.ma20 -and $lastInd.ma20 -gt $lastInd.ma60) { $s = 1 }
-        elseif ($lastInd.ma5 -lt $lastInd.ma20 -and $lastInd.ma20 -lt $lastInd.ma60) { $s = -1 }
-        $score += $s * 1.2; $weightSum += 1.2
-        $reasons += if ($s -gt 0) { "均線呈多頭排列(MA5>MA20>MA60)" } elseif ($s -lt 0) { "均線呈空頭排列(MA5<MA20<MA60)" } else { "均線糾結，未成排列" }
-    }
-
-    # MACD柱狀體方向
-    if ($lastInd.histogram -ne $null) {
-        $s = [math]::Sign($lastInd.histogram)
-        $score += $s * 1.0; $weightSum += 1.0
-        $note = if ($lastInd.macd -ne $null -and $lastInd.macd -lt 0 -and $s -gt 0) { "（柱狀體翻正但仍在0軸下，屬初升段訊號）" } else { "" }
-        $reasons += "MACD柱狀體$(if ($s -ge 0) { '翻正' } else { '翻負' })$note"
-    }
-
-    # RSI相對50中軸
-    if ($lastInd.rsi14 -ne $null) {
-        $s = [math]::Sign($lastInd.rsi14 - 50)
-        $score += $s * 0.8; $weightSum += 0.8
-        $reasons += "RSI(14) $([math]::Round($lastInd.rsi14,1)) $(if ($s -ge 0) { '站上' } else { '跌破' })50中軸"
-    }
-
-    # KD交叉方向
-    if ($lastInd.k -ne $null -and $lastInd.d -ne $null) {
-        $s = [math]::Sign($lastInd.k - $lastInd.d)
-        $score += $s * 0.6; $weightSum += 0.6
-        $reasons += if ($s -gt 0) { "KD 黃金交叉(K>D)" } elseif ($s -lt 0) { "KD 死亡交叉(K<D)" } else { "KD K=D" }
-    }
-
-    # 獨立風險/提醒（不計分）
-    if ($lastInd.rsi14 -ne $null) {
-        if ($lastInd.rsi14 -gt 70) { $risk += "RSI超買，留意短線拉回風險" }
-        elseif ($lastInd.rsi14 -lt 30) { $risk += "RSI超賣，留意反彈契機" }
-    }
-    if ($lastInd.k -ne $null) {
-        if ($lastInd.k -gt 80) { $risk += "KD高檔鈍化，留意過熱拉回風險" }
-        elseif ($lastInd.k -lt 20) { $risk += "KD低檔鈍化，留意超跌反彈契機" }
-    }
-    if ($lastInd.bbUpper -ne $null -and $lastInd.bbLower -ne $null -and $lastInd.bbUpper -gt $lastInd.bbLower) {
-        $pos = ($lastClose - $lastInd.bbLower) / ($lastInd.bbUpper - $lastInd.bbLower)
-        if ($pos -ge 0.9) { $risk += "股價貼近布林上軌，短線過熱疑慮" }
-        elseif ($pos -le 0.1) { $risk += "股價貼近布林下軌，具超跌支撐性質" }
-    }
-    # 量價背離：近5日新高/新低 + 量能跟前5日均量比較
-    if ($daily.Count -ge 10) {
-        $recent5 = $daily | Select-Object -Last 5
-        $prev5 = $daily | Select-Object -Last 10 | Select-Object -First 5
-        $prevAvgVol = ($prev5 | Measure-Object -Property volume -Average).Average
-        $todayClose = $daily[-1].close
-        $todayVol = $daily[-1].volume
-        $recent5HighClose = ($recent5 | Measure-Object -Property close -Maximum).Maximum
-        $recent5LowClose = ($recent5 | Measure-Object -Property close -Minimum).Minimum
-        if ($todayClose -ge $recent5HighClose -and $todayVol -lt $prevAvgVol) { $risk += "價漲量縮，動能背離值得留意" }
-        elseif ($todayClose -le $recent5LowClose -and $todayVol -gt $prevAvgVol) { $risk += "價跌量增，賣壓沉重" }
-    }
-
-    if ($weightSum -eq 0) { return $null }
-    $avg = $score / $weightSum
-    $verdict = if ($avg -ge 0.34) { "偏多" } elseif ($avg -le -0.34) { "偏空" } else { "中性" }
-    $cls = if ($avg -ge 0.34) { "up" } elseif ($avg -le -0.34) { "down" } else { "" }
-
-    $support = if ($lastInd.ma60 -ne $null -and $lastInd.bbLower -ne $null) { [math]::Max($lastInd.ma60, $lastInd.bbLower) } elseif ($lastInd.ma60 -ne $null) { $lastInd.ma60 } else { $lastInd.bbLower }
-    $resistance = if ($lastInd.bbUpper -ne $null) { [math]::Min($sixMonthHigh, $lastInd.bbUpper) } else { $sixMonthHigh }
-
-    return [PSCustomObject]@{
-        verdict = $verdict; cls = $cls; reasons = $reasons; risk = $risk
-        levels = [PSCustomObject]@{
-            support = [math]::Round($support, 0); resistance = [math]::Round($resistance, 0)
-            stopLoss = [math]::Round($support, 0); takeProfit = [math]::Round($resistance, 0)
-        }
-    }
 }
 
 $pe = $d.valuation.peRatio

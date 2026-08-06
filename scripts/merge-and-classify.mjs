@@ -1096,22 +1096,47 @@ function classifyTechnicalSignal(daily, lastInd, lastClose, sixMonthHigh) {
 // predictionAccuracySummary這一個欄位，其餘完全維持這次讀到的原樣，不會被覆蓋。
 async function runBackfillOnly() {
   const d = JSON.parse(await readFile(DATA_PATH, "utf8"));
+
+  // 夜盤K線圖：底層檔案本身不受鎖定時間窗影響(見fetch-market-context.mjs的
+  // fetchTaifexNightClose/appendTaifexNightHistory，兩者都是無條件呼叫)，這裡
+  // 只是把它重新切6個月子集塞回data.json，讓卡片跟得上已經是最新的底層資料。
+  // 跟下面近1年台股日K(twDaily1y)的抓取完全無關，刻意獨立處理，不被那邊的
+  // 失敗連累。
+  try {
+    const txNightHistory = JSON.parse(await readFile(TX_NIGHT_HISTORY_PATH, "utf8"));
+    d.taifexNightHistory = filterSeriesToRecentMonths(txNightHistory, 6);
+  } catch {
+    // 檔案不存在或格式壞掉，維持data.json裡原本的taifexNightHistory不變
+  }
+
+  // 技術面買賣訊號：純規則式計算，不需要額外抓取，d.daily/d.indicators在鎖定
+  // 時間窗內其實已經是update-dashboard.mjs那步剛更新好的新資料，直接拿來算。
+  // 同樣跟twDaily1y無關，獨立處理。
+  if (d.daily?.length > 0 && d.indicators?.length > 0 && d.valuation) {
+    const lastInd = d.indicators[d.indicators.length - 1];
+    const lastClose = d.valuation.closePrice;
+    const sixMonthHigh = Math.max(...d.daily.map((x) => x.close));
+    d.technicalSignal = classifyTechnicalSignal(d.daily, lastInd, lastClose, sixMonthHigh);
+  }
+
+  // predictionAccuracySummary才需要近1年台股日K，這裡失敗只略過這一項，不影響
+  // 上面兩項已經算好、準備寫入的欄位。
   let twDaily1y = [];
   try {
     twDaily1y = await fetchTwseDailyRange(REGRESSION_WINDOW_MONTHS);
   } catch (e) {
-    console.warn("抓取近1年台股日K失敗，略過收盤後回填: " + e.message);
-    return;
+    console.warn("抓取近1年台股日K失敗，略過準確度回填(其餘欄位仍照常更新): " + e.message);
   }
-  if (twDaily1y.length === 0) {
-    console.warn("近1年台股日K為空，略過收盤後回填");
-    return;
+  if (twDaily1y.length > 0) {
+    const predictionHistory = await updatePredictionAccuracyHistory(twDaily1y, null);
+    const summary = computePredictionAccuracySummary(predictionHistory);
+    if (summary) d.predictionAccuracySummary = summary;
+  } else {
+    console.warn("近1年台股日K為空，略過準確度回填(其餘欄位仍照常更新)");
   }
-  const predictionHistory = await updatePredictionAccuracyHistory(twDaily1y, null);
-  const summary = computePredictionAccuracySummary(predictionHistory);
-  if (summary) d.predictionAccuracySummary = summary;
+
   await writeFile(DATA_PATH, JSON.stringify(d), "utf8");
-  console.log("已完成收盤後回填(--backfill-only模式)，僅更新predictionAccuracySummary，其餘欄位不變。");
+  console.log("已完成收盤後回填(--backfill-only模式)：predictionAccuracySummary/taifexNightHistory/technicalSignal已更新，其餘欄位不變。");
 }
 
 async function main() {
