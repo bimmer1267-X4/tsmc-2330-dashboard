@@ -29,23 +29,41 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Fetch live quote
-        run: node scripts/fetch-live-quote.mjs
-
-      - name: Backfill prediction accuracy tracking with today's close
-        run: node scripts/merge-and-classify.mjs --backfill-only
-
-      - name: Build dashboard.html
-        run: node scripts/build.mjs
-
-      - name: Commit and push if changed
+      # 這個workflow跟update-dashboard.yml共用同一個concurrency群組(序列化執行，
+      # 不會同時跑)，但GitHub的git後端在「push剛被接受」跟「下一個排隊中的run做
+      # checkout」之間偶爾有短暫的最終一致性延遲，導致偶爾checkout到還沒看見前一個
+      # run剛push的commit，push時被判定non-fast-forward而失敗——這個對話裡已經
+      # 實測遇過兩次。data/data.json是JSON.stringify()產出的單行minified文字，
+      # git的逐行diff/merge/rebase對這種格式毫無意義(整份檔案只有一行，任一邊只要
+      # 有改動，git一律判定整行衝突)，所以撞車時不嘗試rebase，而是重新從最新main
+      # 出發、用同樣的腳本重新產生一次資料再重試push，最多重試3次。
+      - name: Fetch live quote + backfill + build + commit (retry on push race)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/data.json data/prediction-accuracy-history.json dashboard.html index.html
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-          else
+
+          MAX_ATTEMPTS=3
+          for ATTEMPT in $(seq 1 $MAX_ATTEMPTS); do
+            node scripts/fetch-live-quote.mjs
+            node scripts/merge-and-classify.mjs --backfill-only
+            node scripts/build.mjs
+
+            git add data/data.json data/prediction-accuracy-history.json dashboard.html index.html
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+              break
+            fi
             git commit -m "chore: post-close update (live quote + accuracy backfill)"
-            git push
-          fi
+            if git push; then
+              echo "Push成功(第${ATTEMPT}次嘗試)"
+              break
+            fi
+            if [ "$ATTEMPT" -eq "$MAX_ATTEMPTS" ]; then
+              echo "Push連續失敗${MAX_ATTEMPTS}次，放棄(可能是持續性衝突，非單純撞車)"
+              exit 1
+            fi
+            echo "Push被拒絕(可能跟其他workflow撞車)，重新同步main後重試..."
+            git fetch origin main
+            git reset --hard origin/main
+            sleep $((RANDOM % 5 + 3))
+          done
