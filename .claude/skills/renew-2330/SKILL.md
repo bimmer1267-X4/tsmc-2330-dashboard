@@ -19,6 +19,8 @@ description: Manually trigger and verify a one-off refresh of the TSMC (2330) da
 
 4. **回報**：用繁體中文簡短總結——兩個 workflow 這次觸發是否都成功、資料是否有更新。可以讀 `data/data.json` 的 `generatedAt`（來自 `update-dashboard.yml`）告訴使用者日K/預測等大部分資料是幾號的，以及 `liveQuote.date`/`liveQuote.time`/`liveQuote.price`（來自 `post-close-update.yml`）告訴使用者「收盤價」卡片現在顯示的是哪個時間點的報價。附上兩個 workflow run 的網址（方便使用者自己點進去看）。任一個失敗的話說明原因和下一步建議。
 
+5. **Telegram通知**：回報完之後，額外執行 `bash /home/user/tsmc-2330-dashboard/scripts/notify-telegram.sh "<標題>" "<內文>"` 發一則Telegram通知，把步驟4的回報內容濃縮成一則訊息（兩個workflow的結果合併成一則即可，不用發兩則）。這支腳本在環境變數 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` 沒設定或呼叫失敗時會自己安靜跳過並正常結束，不需要另外判斷，直接呼叫即可。標題依整體結果決定：兩個都成功用 `✅ TSMC 2330｜手動更新(renew-2330)完成`，任一個失敗用 `❌ TSMC 2330｜手動更新(renew-2330)失敗`；內文放資料日期、liveQuote時間點/價格、以及失敗原因（如果有）。
+
 ## 注意事項
 
 - 這個操作對 repo 是安全的、可以隨時重複執行——它做的事跟排程本來會做的事完全一樣，只是提前手動觸發，不會產生預期外的副作用。

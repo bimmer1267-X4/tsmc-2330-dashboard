@@ -33,6 +33,8 @@ description: Manually trigger and verify a one-off run of the AI chip-analysis R
 
 5. **回報**：用繁體中文簡短總結——這次觸發的結果、`chip-analysis.html` 現在的更新時間、分析標籤是「今日觀察」還是「下週一展望」、頁面連結。
 
+6. **Telegram通知**：回報完之後，額外執行 `bash /home/user/tsmc-2330-dashboard/scripts/notify-telegram.sh "<標題>" "<內文>"` 發一則Telegram通知，把步驟5的回報內容濃縮成一則訊息。這支腳本在環境變數 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` 沒設定或呼叫失敗時會自己安靜跳過並正常結束，不需要另外判斷，直接呼叫即可。標題依結果決定：成功用 `✅ TSMC 2330｜手動更新AI籌碼面分析(renew-ai)完成`，失敗/卡住用 `❌ TSMC 2330｜手動更新AI籌碼面分析(renew-ai)失敗`；內文放更新時間、badge標籤，或失敗原因。
+
 ## 注意事項
 
 - 這個操作對 repo 是安全的、可以重複執行——每次都只是覆寫 `chip-analysis.html` 一個檔案並直接 push，不會影響其他檔案或觸發額外的 GitHub Actions。
