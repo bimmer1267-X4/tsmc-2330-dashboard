@@ -918,10 +918,15 @@
     const card = document.getElementById('taifex-night-card');
     if (!t) { if (card) card.style.display = 'none'; return; }
 
+    // 夜盤歷史序列要提前宣告(原本宣告在下面K線圖那段)：下面算「這場夜盤時間窗」的開盤
+    // 日要用到hist的前一筆，順序要提前到那之前。
+    const hist = raw.taifexNightHistory || [];
+
     document.getElementById('taifex-night-price').textContent = fmt(t.close,0);
-    // t.date是夜盤標示的起始日(D，15:00開盤那天)，不是05:00收盤那天(D+1)——這裡直接標
-    // 這場夜盤自己的日期，跟.sub那行「這場夜盤時間窗：D 15:00～D+1 05:00收盤」、K線圖
-    // 最右邊那根bar的日期一致，不用另外換算成收盤日以免跟其他地方的日期標示對不起來。
+    // t.date是TAIFEX官方「交易日期」欄位，語意是「這場盤後時段入帳的下一個正式交易
+    // 日」，不是「15:00開盤那天」(見fetch-market-context.mjs的fetchTaifexNightClose註
+    // 解)——這裡直接標這個官方標示的交易日，跟TAIFEX官網查詢用的日期、K線圖最右邊那根
+    // bar的日期一致，是台指期夜盤慣例上的標準標示法，故意不換算成實際開盤/收盤日。
     const tDate = new Date(t.date + 'T00:00:00Z');
     document.getElementById('taifex-night-date').textContent = (tDate.getUTCMonth()+1) + '月' + tDate.getUTCDate() + '日';
     const deltaEl = document.getElementById('taifex-night-delta');
@@ -938,19 +943,25 @@
       deltaEl.textContent = '';
     }
 
-    // 夜盤時間窗：TAIFEX用夜盤「開盤」那一天(15:00)當日期標示D，實際收盤在D+1清晨05:00
-    // (見fetch-market-context.mjs的fetchTaifexNightClose註解)。這裡把完整時間窗直接寫在
-    // 卡片上，讓使用者自己就能判斷這筆代表的是哪一場，不用另外記日期標示規則。純日曆
-    // 加一天，不查交易日曆——只是描述這一場實際開收盤的時間，不是下一個交易日。
-    const nightStart = new Date(t.date + 'T00:00:00Z');
+    // 夜盤時間窗：t.date是「入帳的下一交易日」，不是開盤日，實際開盤日(15:00)其實是
+    // taifexNightHistory最後一筆(hist最新的一筆)的date——appendTaifexNightHistory只在
+    // 「換到新一場」那一刻才把前一場寫進history(見fetch-market-context.mjs該函式註
+    // 解)，所以hist目前還不包含t這場(還在今天，尚未finalize)；hist最後一筆是「上一場」
+    // 已finalize的session，它自己的官方標示日，剛好就是下一場(也就是t這場)實際開盤的
+    // 那一天(每個交易日固定只有一場夜盤，前後鏈接成連續序列)。
+    // 邊界情況：hist是空陣列(歷史檔案剛建立、還沒有任何一筆)時沒有「上一筆」可用，退
+    // 化成把t.date本身當開盤日——這會少算一段跨假日空隙，但只影響資料剛開始累積的極早
+    // 期，且只是說明文字略有誤差，不影響K線圖本身的數值。
+    const nightStart = hist.length >= 1
+      ? new Date(hist[hist.length - 1].date + 'T00:00:00Z')
+      : new Date(t.date + 'T00:00:00Z');
     const nightEnd = new Date(nightStart.getTime() + 24*3600*1000);
     const fmtMD = (dt) => (dt.getUTCMonth()+1) + '/' + dt.getUTCDate();
     document.getElementById('taifex-night-sub').textContent =
       '這場夜盤時間窗：' + fmtMD(nightStart) + ' 15:00 ～ ' + fmtMD(nightEnd) + ' 05:00收盤' +
       (t.contractMonth ? '（近月合約 ' + t.contractMonth + '）' : '');
 
-    // ---- K線圖：近6個月夜盤歷史(raw.taifexNightHistory) ----
-    const hist = raw.taifexNightHistory || [];
+    // ---- K線圖：近6個月夜盤歷史(raw.taifexNightHistory，hist已在上面提前宣告) ----
     if (hist.length === 0) return;
     // 種子歷史(使用者提供CSV回填的那384筆)沒有open/high/low，缺OHLC的列用close退化成
     // 一條扁平線(open=high=low=close)，不回頭捏造假資料，也不因為缺欄位就整筆跳過不顯示。

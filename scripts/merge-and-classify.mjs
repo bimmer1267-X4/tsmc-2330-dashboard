@@ -957,10 +957,12 @@ function buildOpenGapModelV4(adrSeries, fxSeries, twDaily, premiumHistory, txNig
     if (!analog) continue;
     const analogGapPct = (analog.avgTwOpen / Tprev.close - 1) * 100;
 
-    // TX夜盤配對用同一個ADR日期D去找對應的夜盤日期D這一場(同一個「隔夜」概念)——D這天
-    // 15:00開始的夜盤，跟D這天美股ADR是同一個交易日晚上發生的兩件事，理論上都在T(D+1)
-    // 開盤前就已知，配對邏輯上跟ADR共用同一個D。
-    const txNightChangePct = txNightMap.get(D);
+    // TX夜盤history的date欄位語意是「這場盤後入帳的下一個正式交易日」(TAIFEX官方欄位
+    // 語意，2026-08-08診斷確認)，不是「開盤那天D」——D這天15:00開始的夜盤，收盤入帳的
+    // 交易日剛好就是T(twDaily裡緊接在D之後的下一筆)，所以要用T.date去查，不是D。用D查
+    // 等於系統性抓錯一天，過去這裡幾乎必定查不到(每筆都在下面continue)，V4模型長期以
+    // 來很可能都在默默fallback回V3。
+    const txNightChangePct = txNightMap.get(T.date);
     if (txNightChangePct == null) continue;
 
     pairs.push({ twDate: T.date, adrDate: D, adrClose, adrChangePct, premiumDev, analogGapPct, txNightChangePct, twOpenGapPct, prevClose: Tprev.close, actualOpen: T.open, actualClose: T.close });
