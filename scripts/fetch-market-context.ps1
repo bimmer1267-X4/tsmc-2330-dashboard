@@ -166,14 +166,21 @@ function Get-OptionsMarket {
 #
 # 改用TAIFEX官方網站自己在用的「期貨每日交易行情下載」表單背後的端點
 # (https://www.taifex.com.tw/cht/3/futDataDown，POST表單，回傳Big5編碼CSV)。同一個
-# 19:40時間點實測：這個端點查得到的TX近月合約盤後列，"交易日期"已經是當天、"收盤價"
-# (實際上是最後成交價，結算價欄位還是"-"表示尚未結算)持續反映當晚夜盤最新成交，證實
-# 是真正跟得上進度的資料源。表頭欄位、資料格式都已用實際回傳驗證過(2026-08-05
-# GitHub Actions run)：
+# 19:40時間點實測：這個端點查得到的TX近月合約盤後列，"收盤價"(實際上是最後成交價，
+# 結算價欄位還是"-"表示尚未結算)持續反映當晚夜盤最新成交，證實是真正跟得上進度的資
+# 料源。表頭欄位、資料格式都已用實際回傳驗證過(2026-08-05 GitHub Actions run)：
 #   交易日期,契約,到期月份(週別),開盤價,最高價,最低價,收盤價,漲跌價,漲跌%,成交量,
 #   結算價,未沖銷契約數,最後最佳買價,最後最佳賣價,歷史最高價,歷史最低價,
 #   是否因訊息面暫停交易,交易時段,價差對單式委託成交量
 # "交易時段"欄位是"一般"(日盤)或"盤後"(夜盤)，同一天同一合約各一列。
+#
+# 重要（2026-08-08診斷確認）："交易日期"欄位對盤後(夜盤)列的語意，是「這場盤後時段結
+# 束後、緊接著的下一個正式交易日」，不是「這場盤後開盤當天」。平日兩者只差一個日曆
+# 天(開盤週一15:00、收盤週二05:00，"交易日期"=週二)，容易誤判成開盤當天；跨週末/連假
+# 時"交易日期"會直接跳到下一個交易日(例如週五開盤這場，"交易日期"是下週一)。這是
+# TAIFEX官方＋一般台指期夜盤慣例上「夜盤屬於哪個交易日」的標準標示法，不是資料錯誤，
+# 但呼叫端(Get-TaifexNightClose的查詢範圍、下游顯示邏輯)都要照這個語意來用，見下方
+# Get-TaifexNightClose的查詢範圍註解。
 #
 # .NET Core/PowerShell 7在不註冊CodePagesEncodingProvider的情況下無法解析Big5(950)，
 # Windows PowerShell 5.1則原生支援；這裡統一先嘗試註冊，失敗就當作已經內建，不影響後續。
@@ -217,9 +224,15 @@ function Select-LatestNightRow($Rows) {
 # 補跑)時，不能拿「這場」跟「自己」比出漲跌%——但也不能就此把changePct/changePts重置
 # 成null，否則每次手動補跑都會把稍早已經算好的漲跌%洗掉。date沒變時保留$Previous裡
 # 原本的值。
+# queryEndDate要往未來多推(2026-08-08修正)：最新一場盤後資料的"交易日期"標籤是「下一
+# 個正式交易日」，不是「今天」，跨週末/連假時這個標籤會落在「今天」之後，若查詢範圍
+# 只到今天就會完全涵蓋不到最新這一筆，抓到的其實是上一場舊資料卻被誤判成最新(實測案
+# 例：週五開盤這場，"交易日期"=下週一，週六執行的抓取因此永遠抓不到)。往未來多推10天
+# 留足農曆新年等最長連假的餘裕；futDataDown只會回傳真實已發布的列，不會生出不存在的
+# 未來資料，往未來多留查詢範圍是安全的。
 function Get-TaifexNightClose($Previous) {
     $nowTaipei = (Get-Date).ToUniversalTime().AddHours(8)
-    $endStr = $nowTaipei.ToString("yyyy/MM/dd")
+    $endStr = $nowTaipei.AddDays(10).ToString("yyyy/MM/dd")
     $startStr = $nowTaipei.AddDays(-5).ToString("yyyy/MM/dd")
     $rows = Get-TaifexFutDataDownRows $startStr $endStr
     $row = Select-LatestNightRow $rows
