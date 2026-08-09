@@ -293,6 +293,27 @@ function Get-RecentMonthsSeries($Series, [int]$Months) {
     return @($Series | Where-Object { $_.date -ge $cutoffStr })
 }
 
+# 從「最後一個真實交易日」推算「下一個交易日」的日曆日期字串，供openPrediction/
+# adrAnalogMatches的forDate使用。2026-08-09查核確認：原本直接拿generatedAt的台北
+# 日曆日當forDate，平日06:00排程執行時剛好等於預測目標交易日、看起來正常，但週末
+# (尤其手動renew-2330在鎖定時間窗外觸發完整重算時)會直接把「今天」這個非交易日的
+# 日期當成forDate——例如週六觸發，模型其實是拿上週五收盤推算下週一開盤，卻被標成
+# 週六。這裡改成純粹從LastTradingDateStr($d.daily最後一筆，只會是真實開過盤的日子)
+# 往後推，遇到星期六(6)/星期日(0)就跳過，落在星期一~五才停——平日單一交易日間隔
+# (例如週二推週三)算出來的還是跟原本邏輯一樣的「今天」，週末觸發則會正確跳到下週一，
+# 兩種情況都不用另外分支處理。
+# 已知限制：只跳過週六日，沒有內建台股國定假日行事曆，遇到平日剛好是國定假日連假
+# (農曆新年、國慶日等)時，這裡仍會算出當天(其實是假日)當forDate，還是會標錯——要
+# 完全正確需要另外維護一份逐年更新的台股休市日曆，這次先不做，只解決查核當下確認
+# 存在的週末手動觸發問題。跟.mjs版本(nextTradingDayGuess)行為一致。
+function Get-NextTradingDayGuess([string]$LastTradingDateStr) {
+    $cursor = ([datetime]::Parse($LastTradingDateStr)).AddDays(1)
+    while ($cursor.DayOfWeek -eq [System.DayOfWeek]::Saturday -or $cursor.DayOfWeek -eq [System.DayOfWeek]::Sunday) {
+        $cursor = $cursor.AddDays(1)
+    }
+    return $cursor.ToString("yyyy-MM-dd")
+}
+
 # ADR溢價率歷史序列，永久保留、逐日累積（不像data.json的daily只保留近6個月滾動視窗，
 # 這份會一直長下去），供回測「溢價率相對自身歷史均值的偏離，對台股開盤缺口是否有額外
 # 預測力」使用，也是「開盤價機率預估」雙變數模型的訓練資料來源之一。
@@ -1150,13 +1171,12 @@ if (-not $AdrPrice -or -not $AdrQuoteTime -or -not $UsdTwd -or -not $FxQuoteTime
 $path = Join-Path $PSScriptRoot "..\data\data.json"
 $d = Get-Content $path -Raw -Encoding UTF8 | ConvertFrom-Json
 
-# $d.generatedAt(update-dashboard.mjs寫入，這次pipeline開始執行的UTC時間)換算成台北
-# 日曆日期字串，供openPrediction/adrAnalogMatches標記「這是哪一天算出來的」(forDate)。
-# 提早在這裡算好，這樣四層退回模型跟類比估計兩處都能直接用同一個值，不用各自重算。
-# 用DateTimeOffset::Parse明確解析ISO時間字串裡的時區資訊(而不是Get-Date隱含依賴系統
-# 當地文化/時區設定)，確保不論執行環境的系統時區為何，都能正確換算成UTC後+8小時得到
-# 台北日期，行為跟.mjs版本(new Date(...).getTime() + 8*3600*1000)一致。
-$todayDateStr = ([datetimeoffset]::Parse($d.generatedAt)).UtcDateTime.AddHours(8).ToString("yyyy-MM-dd")
+# 供openPrediction/adrAnalogMatches標記「這個預測是為哪一個交易日算的」(forDate)。
+# 不能直接拿generatedAt的台北日曆日當forDate(2026-08-09查核發現的問題，見
+# Get-NextTradingDayGuess註解)，改用$d.daily(TWSE STOCK_DAY，只會有真實開過盤的
+# 日子)最後一筆往後推算下一個交易日。提早在這裡算好，這樣四層退回模型跟類比估計
+# 兩處都能直接用同一個值，不用各自重算。
+$todayDateStr = Get-NextTradingDayGuess $d.daily[-1].date
 
 $d.adr = [PSCustomObject]@{
     price     = $AdrPrice

@@ -174,6 +174,27 @@ function filterSeriesToRecentMonths(series, months) {
   return series.filter((s) => s.date >= cutoffStr);
 }
 
+// 從「最後一個真實交易日」推算「下一個交易日」的日曆日期字串，供openPrediction/
+// adrAnalogMatches的forDate使用。2026-08-09查核確認：原本直接拿generatedAt的台北
+// 日曆日當forDate，平日06:00排程執行時剛好等於預測目標交易日、看起來正常，但週末
+// (尤其手動renew-2330在鎖定時間窗外觸發完整重算時)會直接把「今天」這個非交易日的
+// 日期當成forDate——例如週六觸發，模型其實是拿上週五收盤推算下週一開盤，卻被標成
+// 週六。這裡改成純粹從lastTradingDateStr(d.daily最後一筆，只會是真實開過盤的日子)
+// 往後推，遇到星期六(6)/星期日(0)就跳過，落在星期一~五才停——平日單一交易日間隔
+// (例如週二推週三)算出來的還是跟原本邏輯一樣的「今天」，週末觸發則會正確跳到下週一，
+// 兩種情況都不用另外分支處理。
+// 已知限制：只跳過週六日，沒有內建台股國定假日行事曆，遇到平日剛好是國定假日連假
+// (農曆新年、國慶日等)時，這裡仍會算出當天(其實是假日)當forDate，還是會標錯——要
+// 完全正確需要另外維護一份逐年更新的台股休市日曆，這次先不做，只解決查核當下確認
+// 存在的週末手動觸發問題。
+function nextTradingDayGuess(lastTradingDateStr) {
+  let cursor = new Date(new Date(lastTradingDateStr + "T00:00:00Z").getTime() + 24 * 3600 * 1000);
+  while (cursor.getUTCDay() === 0 || cursor.getUTCDay() === 6) {
+    cursor = new Date(cursor.getTime() + 24 * 3600 * 1000);
+  }
+  return cursor.toISOString().slice(0, 10);
+}
+
 // ---- 統計小工具 ----
 function mean(a) { return a.reduce((x, y) => x + y, 0) / a.length; }
 function stddev(a) { const m = mean(a); return Math.sqrt(mean(a.map((x) => (x - m) ** 2))); }
@@ -1183,10 +1204,12 @@ async function main() {
 
   const d = JSON.parse(await readFile(DATA_PATH, "utf8"));
 
-  // d.generatedAt(update-dashboard.mjs寫入，這次pipeline開始執行的UTC時間)換算成台北
-  // 日曆日期字串，供openPrediction/adrAnalogMatches標記「這是哪一天算出來的」(forDate)。
-  // 提早在這裡算好，這樣四層退回模型跟類比估計兩處都能直接用同一個值，不用各自重算。
-  const todayDateStr = new Date(new Date(d.generatedAt).getTime() + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  // 供openPrediction/adrAnalogMatches標記「這個預測是為哪一個交易日算的」(forDate)。
+  // 不能直接拿generatedAt的台北日曆日當forDate(2026-08-09查核發現的問題，見
+  // nextTradingDayGuess註解)，改用d.daily(TWSE STOCK_DAY，只會有真實開過盤的日子)
+  // 最後一筆往後推算下一個交易日。提早在這裡算好，這樣四層退回模型跟類比估計兩處都
+  // 能直接用同一個值，不用各自重算。
+  const todayDateStr = nextTradingDayGuess(d.daily[d.daily.length - 1].date);
 
   d.adr = {
     price: adrPrice,
