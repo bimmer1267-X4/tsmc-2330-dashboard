@@ -115,16 +115,18 @@
 </style>
 
 <div class="card">
-  <h1>台積電 2330 收盤價儀表板-（交易日當日下午13:30過後更新收盤價，更新時間：<span id="h1-updated-at">--</span>）</h1>
+  <h1><span id="h1-date-label"></span>台積電2330盤前摘要整理（更新時間：<span id="h1-updated-at">--</span>）</h1>
   <div class="sub">資料更新時間：<span id="updated-at">--</span>（台灣時間）｜資料來源：TWSE 台灣證券交易所（股價/本益比/EPS）、stockanalysis.com＋Yahoo Finance 交叉比對（ADR）、Yahoo股市（匯率）</div>
   <div class="header-row">
     <div>
-      <div class="hero"><span id="hero-price">--</span><span id="hero-date" style="font-size:16px; font-weight:700; color:var(--muted); margin-left:8px;"></span></div>
+      <div class="metric-label" id="hero-date">--</div>
+      <div class="hero"><span id="hero-price">--</span></div>
       <div><span class="delta" id="hero-delta"></span></div>
     </div>
-    <div style="margin-left:auto; text-align:right;">
-      <div class="metric-label">套牢價（近6個月最高收盤價）</div>
-      <div id="trapped-price" style="color:var(--critical); font-size:22px; font-weight:700; font-variant-numeric:tabular-nums;">--</div>
+    <div id="hero-pred-block" style="display:none;">
+      <div class="metric-label" id="hero-pred-label">盤前預測</div>
+      <div class="hero" style="font-size:36px;"><span id="hero-pred-range">--</span></div>
+      <div style="font-size:13px; color:var(--muted); margin-top:2px;" id="hero-pred-prob"></div>
     </div>
   </div>
   <div class="metrics" id="metrics-grid"></div>
@@ -354,11 +356,12 @@
     const d = r.daily, m = d.length;
     const lastBar = d[m-1];
     let heroPrice = lastBar.close, heroPrevClose = d[m-2] ? d[m-2].close : lastBar.close, liveNote = '';
-    let heroDate = lastBar.date;
+    let heroDate = lastBar.date, usedLiveQuote = false;
     if (r.liveQuote && r.liveQuote.date && r.liveQuote.date !== lastBar.date && r.liveQuote.price != null) {
       heroPrice = r.liveQuote.price;
       heroPrevClose = lastBar.close;
       heroDate = r.liveQuote.date;
+      usedLiveQuote = true;
       const quoteInstant = new Date(r.liveQuote.date + 'T' + (r.liveQuote.time || '00:00:00') + '+08:00');
       const ageMs = Date.now() - quoteInstant.getTime();
       const isFresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs < 15 * 60 * 1000;
@@ -367,9 +370,11 @@
     const chg = heroPrice - heroPrevClose, chgPct = (chg/heroPrevClose*100).toFixed(2);
     document.getElementById('hero-price').textContent = fmt(heroPrice,0);
     // heroDate跟heroPrice用同一套if/else決定(liveQuote較新就兩者一起換)，不能各自判斷，
-    // 否則價格已經是即時報價、日期卻還停在daily最後一筆會對不起來。
+    // 否則價格已經是即時報價、日期卻還停在daily最後一筆會對不起來。usedLiveQuote同一套
+    // 判斷式順便決定「X月X日」後面要標「收盤價」還是「盤中即時價」——這個分支被選中時，
+    // heroPrice本來就是還沒收盤的盤中成交價，標成「收盤價」會誤導使用者。
     const heroDateObj = new Date(heroDate + 'T00:00:00Z');
-    document.getElementById('hero-date').textContent = (heroDateObj.getUTCMonth()+1) + '月' + heroDateObj.getUTCDate() + '日';
+    document.getElementById('hero-date').textContent = (heroDateObj.getUTCMonth()+1) + '月' + heroDateObj.getUTCDate() + '日' + (usedLiveQuote ? ' 盤中即時價' : '收盤價');
     const deltaEl = document.getElementById('hero-delta');
     deltaEl.textContent = (chg>=0?'+':'') + fmt(chg,2) + ' (' + (chg>=0?'+':'') + chgPct + '%)';
     deltaEl.className = 'delta ' + (chg>=0?'up':'down');
@@ -385,7 +390,6 @@
   renderHero(raw);
 
   const sixMonthHighClose = Math.max(...daily.map((d) => d.close));
-  document.getElementById('trapped-price').textContent = fmt(sixMonthHighClose,0) + ' 元';
 
   // 通用「指標小格」渲染：label + value + 選填的紅字提示（例如套牢價）。
   // metrics-grid（ADR/匯率）與 market-context-grid（籌碼面/大盤指數）共用同一套渲染邏輯。
@@ -407,12 +411,24 @@
   }
 
   const adrTrappedNote = raw.adrSixMonthHighUsd!=null ? '套牢價 $'+fmt(raw.adrSixMonthHighUsd,2) : null;
-  renderMetricsGrid('metrics-grid', [
-    ['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)', adrTrappedNote],
-    ['ADR換算台股價', fmt(raw.adrImpliedTwd,0)+' 元'],
-    ['ADR溢價', (raw.adrPremiumPct>=0?'+':'')+raw.adrPremiumPct+'%'],
-    ['USD/TWD', fmt(fx.usdTwd,3)]
-  ]);
+  // 頂部「盤前摘要」的次要指標列：在原本ADR/匯率四格的基礎上，前面插入ADR歷史類比估計、
+  // ADR換算台股價後面插入SOX——兩者都直接讀跟下方對應卡片同一份後端算好的資料
+  // (raw.adrAnalogMatches / raw.soxIndex)，不重算，兩處數字保證一致；缺資料就跳過該格，
+  // 不顯示"—"（沿用這個dashboard一貫的「缺資料就不放格子」慣例，不是漏掉）。套牢價原本
+  // 用獨立大字紅色數字放在卡片右上角，這裡降級成普通小格排進來，不再跟盤前預測搶視覺焦點。
+  const heroMetrics = [];
+  if (raw.adrAnalogMatches && raw.adrAnalogMatches.avgTwOpenAdjusted != null) {
+    heroMetrics.push(['ADR歷史類比估計', fmt(raw.adrAnalogMatches.avgTwOpenAdjusted,0)+' 元']);
+  }
+  heroMetrics.push(['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)', adrTrappedNote]);
+  heroMetrics.push(['ADR換算台股價', fmt(raw.adrImpliedTwd,0)+' 元']);
+  if (raw.soxIndex) {
+    heroMetrics.push(['費城半導體指數(SOX)', fmt(raw.soxIndex.price,2)+' ('+(raw.soxIndex.changePct>=0?'+':'')+fmt(raw.soxIndex.changePct,2)+'%)']);
+  }
+  heroMetrics.push(['ADR溢價', (raw.adrPremiumPct>=0?'+':'')+raw.adrPremiumPct+'%']);
+  heroMetrics.push(['USD/TWD', fmt(fx.usdTwd,3)]);
+  heroMetrics.push(['套牢價（近6個月最高收盤價）', fmt(sixMonthHighClose,0)+' 元']);
+  renderMetricsGrid('metrics-grid', heroMetrics);
 
   // ---- 籌碼面與大盤指數（股市經理人視角補充參考資訊）----
   // 每個資料源都可能單獨抓取失敗（欄位為 null），逐項檢查存在才加進清單，
@@ -661,6 +677,41 @@
       modelNote = '模型：開盤缺口% = ' + fmt(m.beta,3) + ' × ADR漲跌% + ' + fmt(m.alpha,3) + '（OLS迴歸，殘差標準差 ' + fmt(m.residualStd,2) + '%，假設常態分布估算機率；溢價率/類比估計歷史樣本數尚不足，暫以單變數模型計算）。⚠️ 純統計關係，不構成投資建議，不保證準確，實際開盤仍以台股交易所公告為準。';
     }
     document.getElementById('prediction-model-note').textContent = modelNote;
+  })();
+
+  // ---- 頂部「盤前摘要整理」卡片：H1日期 + 盤前預測區間快照 ----
+  // 獨立成自己的IIFE、不塞進renderHero：raw.openPrediction一天只在06:00排程重算一次，
+  // 不像heroPrice會被盤中輪詢(fetchLiveQuoteDirect)反覆呼叫renderHero更新，這裡沒必要
+  // 跟著每次輪詢重跑。直接讀raw.openPrediction，不依賴上面「盤前股價預測」卡片那個IIFE
+  // 的執行結果或DOM狀態，兩邊各自獨立讀同一份原始資料，就算之後其中一個UI被拿掉也不會
+  // 牽動另一個。
+  (function(){
+    const pred = raw.openPrediction;
+    // H1標題「X月X日台積電2330盤前摘要整理」的日期，用pred.forDate（這份摘要是為哪個即將
+    // 開盤的交易日準備的），不是heroDate（那是「昨收是哪天」，語意不同）。沒有pred(理論上
+    // 只有最舊的種子資料才會發生)就不加日期前綴，避免顯示"undefined月undefined日"。
+    const h1DateEl = document.getElementById('h1-date-label');
+    if (pred && pred.forDate) {
+      const h1DateObj = new Date(pred.forDate + 'T00:00:00Z');
+      h1DateEl.textContent = (h1DateObj.getUTCMonth()+1) + '月' + h1DateObj.getUTCDate() + '日';
+    }
+
+    const block = document.getElementById('hero-pred-block');
+    if (!pred) { return; } // block預設display:none，維持隱藏即可
+
+    block.style.display = '';
+    const labelEl = document.getElementById('hero-pred-label');
+    if (pred.forDate) {
+      const dObj = new Date(pred.forDate + 'T00:00:00Z');
+      labelEl.textContent = (dObj.getUTCMonth()+1) + '月' + dObj.getUTCDate() + '日盤前預測';
+    } else {
+      labelEl.textContent = '盤前預測';
+    }
+    // 直接複用「盤前股價預測」卡片同一套68%信賴區間格式(低~高)，不重新設計呈現法，
+    // 保證頂部摘要跟下方詳細卡片顯示的是同一組數字。這裡不做分歧箭頭那套疊加符號
+    // (那是給detail卡片的精細呈現)，摘要卡片只求一眼看到區間範圍。
+    document.getElementById('hero-pred-range').textContent = fmt(pred.ci68.low,0) + ' ~ ' + fmt(pred.ci68.high,0) + ' 元';
+    document.getElementById('hero-pred-prob').textContent = '上漲機率 ' + fmt(pred.probUpPct,1) + '%';
   })();
 
   // ---- ADR歷史相近價位類比估計 ----
