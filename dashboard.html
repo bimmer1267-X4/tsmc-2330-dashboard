@@ -125,7 +125,13 @@
     </div>
     <div id="hero-pred-block" style="display:none;">
       <div class="metric-label" id="hero-pred-label">盤前預測</div>
-      <div class="hero"><span id="hero-pred-range">--</span><span id="hero-pred-analog" style="font-size:36px; font-weight:600; color:var(--text-secondary); margin-left:10px;"></span></div>
+      <div class="hero" style="display:flex; align-items:flex-end; flex-wrap:wrap; gap:0 14px;">
+        <span id="hero-pred-range">--</span>
+        <span id="hero-pred-analog-block" style="display:none; flex-direction:column; align-items:flex-start; line-height:1.3;">
+          <span class="metric-label" style="font-size:11px; margin-bottom:2px;">ADR歷史類比推估價位</span>
+          <span id="hero-pred-analog" style="font-size:36px; font-weight:600; color:var(--text-secondary); line-height:1;"></span>
+        </span>
+      </div>
       <div style="font-size:13px; color:var(--muted); margin-top:2px;" id="hero-pred-prob"></div>
     </div>
   </div>
@@ -717,12 +723,15 @@
     document.getElementById('hero-pred-prob').textContent = '上漲機率 ' + fmt(pred.probUpPct,1) + '%';
 
     // ADR歷史類比估計接在盤前預測區間右側，同一份raw.adrAnalogMatches.avgTwOpenAdjusted
-    // (跟下方「ADR歷史相近價位類比估計」卡片analog-avg-price同一個數字來源)，字級/顏色
-    // 刻意跟左邊「收盤價」大字對齊(見上面HTML的inline style)，形成「OLS模型預測(黑) vs
-    // 另一種獨立估計方法(灰)」的視覺主副關係——沒有analog資料就留空，不顯示"undefined"。
-    const analogEl = document.getElementById('hero-pred-analog');
+    // (跟下方「ADR歷史相近價位類比估計」卡片analog-avg-price同一個數字來源)，上方掛
+    // 「ADR歷史類比推估價位」小標籤區隔它跟左邊OLS模型區間是兩種不同方法；字級跟左邊
+    // 「收盤價」大字對齊(見上面HTML的inline style)但用--text-secondary深灰，形成「OLS
+    // 模型預測(黑，主) vs 另一種獨立估計方法(灰，副)」的視覺主副關係。沒有analog資料
+    // (樣本數不足)就整塊連標籤一起隱藏，不要只留標籤配空白數字。
+    const analogBlock = document.getElementById('hero-pred-analog-block');
     if (raw.adrAnalogMatches && raw.adrAnalogMatches.avgTwOpenAdjusted != null) {
-      analogEl.textContent = '· ' + fmt(raw.adrAnalogMatches.avgTwOpenAdjusted,0) + ' 元';
+      analogBlock.style.display = 'flex';
+      document.getElementById('hero-pred-analog').textContent = fmt(raw.adrAnalogMatches.avgTwOpenAdjusted,0) + ' 元';
     }
   })();
 
