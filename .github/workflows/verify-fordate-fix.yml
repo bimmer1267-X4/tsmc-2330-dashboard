@@ -1,0 +1,63 @@
+name: Verify forDate fix (temporary)
+
+# 暫時性驗證workflow：手動繞過update-dashboard.yml的13:30~次日05:50鎖定時間窗，強制跑一次
+# 完整模式(不加--backfill-only/--skip-market-context)，驗證2026-08-09那次forDate修正
+# (nextTradingDayGuess，commit 0d9cd30)在跳過鎖定窗之後，openPrediction.forDate/
+# adrAnalogMatches.forDate是否正確算出下一個交易日，而不是「今天」這個非交易日的日期。
+# 步驟內容等同update-dashboard.yml「未鎖定」那個分支，只是拿掉時間窗判斷、直接強制執行。
+# 驗證完成後會連同這個workflow一起從repo移除，不留作常態使用。
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-dashboard
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Fetch TWSE daily data + technical indicators
+        run: node scripts/update-dashboard.mjs
+
+      - name: Fetch margin trading / SOX+TAIEX / ex-dividend / options open interest
+        run: node scripts/fetch-market-context.mjs
+
+      - name: Merge ADR/FX + classify valuation zone (full mode, bypass lockout window)
+        run: node scripts/merge-and-classify.mjs
+
+      - name: Build dashboard.html
+        run: node scripts/build.mjs
+
+      - name: Print forDate for verification
+        run: |
+          node -e "
+            const d = JSON.parse(require('fs').readFileSync('data/data.json','utf8'));
+            console.log('generatedAt:', d.generatedAt);
+            console.log('daily最後一筆:', d.daily[d.daily.length-1].date);
+            console.log('openPrediction.forDate:', d.openPrediction && d.openPrediction.forDate);
+            console.log('adrAnalogMatches.forDate:', d.adrAnalogMatches && d.adrAnalogMatches.forDate);
+          "
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/data.json data/adr-premium-history.json data/prediction-accuracy-history.json data/taifex-night-history.json dashboard.html index.html
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: 驗證forDate修正(繞過鎖定時間窗手動觸發完整模式)"
+            git push
+          fi
