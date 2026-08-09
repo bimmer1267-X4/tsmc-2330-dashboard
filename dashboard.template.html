@@ -120,12 +120,12 @@
   <div class="header-row">
     <div>
       <div class="metric-label" id="hero-date">--</div>
-      <div class="hero"><span id="hero-price">--</span></div>
+      <div class="hero" style="font-size:36px;"><span id="hero-price">--</span></div>
       <div><span class="delta" id="hero-delta"></span></div>
     </div>
     <div id="hero-pred-block" style="display:none;">
       <div class="metric-label" id="hero-pred-label">盤前預測</div>
-      <div class="hero" style="font-size:36px;"><span id="hero-pred-range">--</span></div>
+      <div class="hero"><span id="hero-pred-range">--</span><span id="hero-pred-analog" style="font-size:36px; font-weight:600; color:var(--text-secondary); margin-left:10px;"></span></div>
       <div style="font-size:13px; color:var(--muted); margin-top:2px;" id="hero-pred-prob"></div>
     </div>
   </div>
@@ -376,8 +376,13 @@
     const heroDateObj = new Date(heroDate + 'T00:00:00Z');
     document.getElementById('hero-date').textContent = (heroDateObj.getUTCMonth()+1) + '月' + heroDateObj.getUTCDate() + '日' + (usedLiveQuote ? ' 盤中即時價' : '收盤價');
     const deltaEl = document.getElementById('hero-delta');
-    deltaEl.textContent = (chg>=0?'+':'') + fmt(chg,2) + ' (' + (chg>=0?'+':'') + chgPct + '%)';
-    deltaEl.className = 'delta ' + (chg>=0?'up':'down');
+    deltaEl.textContent = (chg>0?'+':'') + fmt(chg,2) + ' (' + (chg>0?'+':'') + chgPct + '%)';
+    // 顏色刻意不用共用的.delta.up/.delta.down class——那組是給股價相關卡片用的美式配色
+    // (漲=綠/跌=紅)，這裡改用台灣慣例(漲=紅/跌=綠/平盤=灰)，直接設inline color蓋過共用
+    // class，不去動.delta.up/.delta.down本身(其他還在用美式配色的地方不受影響)。跟
+    // taifex-night-delta同一套做法、同一組顏色變數(--critical紅/--good綠)。
+    deltaEl.className = 'delta';
+    deltaEl.style.color = chg > 0 ? 'var(--critical)' : (chg < 0 ? 'var(--good)' : 'var(--muted)');
     document.getElementById('updated-at').textContent = new Date(r.generatedAt).toLocaleString('zh-TW', {hour12:false, timeZone:'Asia/Taipei'}) + liveNote;
 
     const latestUpdateIso = getLatestUpdateIso(r);
@@ -411,15 +416,13 @@
   }
 
   const adrTrappedNote = raw.adrSixMonthHighUsd!=null ? '套牢價 $'+fmt(raw.adrSixMonthHighUsd,2) : null;
-  // 頂部「盤前摘要」的次要指標列：在原本ADR/匯率四格的基礎上，前面插入ADR歷史類比估計、
-  // ADR換算台股價後面插入SOX——兩者都直接讀跟下方對應卡片同一份後端算好的資料
-  // (raw.adrAnalogMatches / raw.soxIndex)，不重算，兩處數字保證一致；缺資料就跳過該格，
-  // 不顯示"—"（沿用這個dashboard一貫的「缺資料就不放格子」慣例，不是漏掉）。套牢價原本
-  // 用獨立大字紅色數字放在卡片右上角，這裡降級成普通小格排進來，不再跟盤前預測搶視覺焦點。
+  // 頂部「盤前摘要」的次要指標列：在原本ADR/匯率四格的基礎上，ADR換算台股價後面插入
+  // SOX——直接讀跟下方「籌碼面與大盤指數」卡片同一份後端算好的資料(raw.soxIndex)，不
+  // 重算，兩處數字保證一致；抓取失敗(欄位為null)就跳過這格，不顯示"—"（沿用這個
+  // dashboard一貫的「缺資料就不放格子」慣例，不是漏掉）。套牢價原本用獨立大字紅色數字
+  // 放在卡片右上角，這裡降級成普通小格排進來，不再跟盤前預測搶視覺焦點。ADR歷史類比
+  // 估計改放到上面「盤前預測」headline旁邊(見下面新增的IIFE)，這裡不再重複顯示一次。
   const heroMetrics = [];
-  if (raw.adrAnalogMatches && raw.adrAnalogMatches.avgTwOpenAdjusted != null) {
-    heroMetrics.push(['ADR歷史類比估計', fmt(raw.adrAnalogMatches.avgTwOpenAdjusted,0)+' 元']);
-  }
   heroMetrics.push(['TSM ADR', '$'+fmt(adr.price,2)+' ('+(adr.changePct>=0?'+':'')+adr.changePct+'%)', adrTrappedNote]);
   heroMetrics.push(['ADR換算台股價', fmt(raw.adrImpliedTwd,0)+' 元']);
   if (raw.soxIndex) {
@@ -712,6 +715,15 @@
     // (那是給detail卡片的精細呈現)，摘要卡片只求一眼看到區間範圍。
     document.getElementById('hero-pred-range').textContent = fmt(pred.ci68.low,0) + ' ~ ' + fmt(pred.ci68.high,0) + ' 元';
     document.getElementById('hero-pred-prob').textContent = '上漲機率 ' + fmt(pred.probUpPct,1) + '%';
+
+    // ADR歷史類比估計接在盤前預測區間右側，同一份raw.adrAnalogMatches.avgTwOpenAdjusted
+    // (跟下方「ADR歷史相近價位類比估計」卡片analog-avg-price同一個數字來源)，字級/顏色
+    // 刻意跟左邊「收盤價」大字對齊(見上面HTML的inline style)，形成「OLS模型預測(黑) vs
+    // 另一種獨立估計方法(灰)」的視覺主副關係——沒有analog資料就留空，不顯示"undefined"。
+    const analogEl = document.getElementById('hero-pred-analog');
+    if (raw.adrAnalogMatches && raw.adrAnalogMatches.avgTwOpenAdjusted != null) {
+      analogEl.textContent = '· ' + fmt(raw.adrAnalogMatches.avgTwOpenAdjusted,0) + ' 元';
+    }
   })();
 
   // ---- ADR歷史相近價位類比估計 ----
