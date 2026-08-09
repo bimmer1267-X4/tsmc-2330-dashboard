@@ -131,6 +131,10 @@
           <span class="metric-label" style="font-size:11px; margin-bottom:2px;">ADR歷史類比推估價位</span>
           <span id="hero-pred-analog" style="font-size:36px; font-weight:600; color:var(--text-secondary); line-height:1;"></span>
         </span>
+        <span id="hero-pred-support-block" style="display:none; flex-direction:column; align-items:flex-start; line-height:1.3;">
+          <span class="metric-label" style="font-size:11px; margin-bottom:2px;">支撐價</span>
+          <span id="hero-pred-support" style="font-size:36px; font-weight:600; color:var(--text-secondary); line-height:1;"></span>
+        </span>
       </div>
       <div style="font-size:13px; color:var(--up); margin-top:2px;" id="hero-pred-prob"></div>
     </div>
@@ -732,6 +736,16 @@
     if (raw.adrAnalogMatches && raw.adrAnalogMatches.avgTwOpenAdjusted != null) {
       analogBlock.style.display = 'flex';
       document.getElementById('hero-pred-analog').textContent = fmt(raw.adrAnalogMatches.avgTwOpenAdjusted,0) + ' 元';
+    }
+
+    // 支撐價接在ADR類比估計右側，讀跟下方「技術面買賣訊號」卡片technical-signal-levels
+    // 同一份raw.technicalSignal.levels.support，字級/顏色比照ADR類比估計(36px、
+    // --text-secondary深灰)，都是輔助OLS預測區間判斷的參考數字，同一視覺層級。沒有
+    // technicalSignal(理論上只有最舊種子資料才會發生)就整塊隱藏。
+    const supportBlock = document.getElementById('hero-pred-support-block');
+    if (raw.technicalSignal && raw.technicalSignal.levels && raw.technicalSignal.levels.support != null) {
+      supportBlock.style.display = 'flex';
+      document.getElementById('hero-pred-support').textContent = fmt(raw.technicalSignal.levels.support,0) + ' 元';
     }
   })();
 
