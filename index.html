@@ -135,6 +135,10 @@
           <span class="metric-label" style="font-size:11px; margin-bottom:2px;">支撐價</span>
           <span id="hero-pred-support" style="font-size:36px; font-weight:600; color:var(--text-secondary); line-height:1;"></span>
         </span>
+        <span id="hero-pred-resistance-block" style="display:none; flex-direction:column; align-items:flex-start; line-height:1.3;">
+          <span class="metric-label" style="font-size:11px; margin-bottom:2px;">壓力價</span>
+          <span id="hero-pred-resistance" style="font-size:36px; font-weight:600; color:var(--text-secondary); line-height:1;"></span>
+        </span>
       </div>
       <div style="font-size:13px; color:var(--up); margin-top:2px;" id="hero-pred-prob"></div>
     </div>
@@ -746,6 +750,14 @@
     if (raw.technicalSignal && raw.technicalSignal.levels && raw.technicalSignal.levels.support != null) {
       supportBlock.style.display = 'flex';
       document.getElementById('hero-pred-support').textContent = fmt(raw.technicalSignal.levels.support,0) + ' 元';
+    }
+
+    // 壓力價接在支撐價右側，同一份raw.technicalSignal.levels.resistance，樣式完全比照
+    // 支撐價(36px、--text-secondary深灰)。
+    const resistanceBlock = document.getElementById('hero-pred-resistance-block');
+    if (raw.technicalSignal && raw.technicalSignal.levels && raw.technicalSignal.levels.resistance != null) {
+      resistanceBlock.style.display = 'flex';
+      document.getElementById('hero-pred-resistance').textContent = fmt(raw.technicalSignal.levels.resistance,0) + ' 元';
     }
   })();
 
