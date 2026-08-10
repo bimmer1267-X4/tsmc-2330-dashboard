@@ -117,26 +117,30 @@
 <div class="card">
   <h1><span id="h1-date-label"></span>台積電2330盤前摘要整理（更新時間：<span id="h1-updated-at">--</span>）</h1>
   <div class="sub">資料更新時間：<span id="updated-at">--</span>（台灣時間）｜資料來源：TWSE 台灣證券交易所（股價/本益比/EPS）、stockanalysis.com＋Yahoo Finance 交叉比對（ADR）、Yahoo股市（匯率）</div>
-  <div class="header-row">
+  <!-- justify-content:space-between只加在這個特定的header-row(inline style)，不動共用
+       .header-row class本身——下面「盤前股價預測」「ADR歷史相近價位類比估計」等卡片各自
+       的header-row不受影響。四個區塊(收盤價/盤前預測/ADR類比/支撐價)攤平成同一層並列的
+       子元素，讓瀏覽器依這張卡片實際渲染寬度，把內容之外的剩餘空間平均分配成間距，不是
+       固定寫死一個px值——卡片變寬變窄、或其中某幾格因為沒資料被隱藏，間距都會自動重新
+       算過，比原本「盤前預測」內部用固定gap:14px擠三個東西均衡。 -->
+  <div class="header-row" style="justify-content:space-between;">
     <div>
       <div class="metric-label" id="hero-date">--</div>
       <div class="hero" style="font-size:36px;"><span id="hero-price">--</span></div>
       <div><span class="delta" id="hero-delta"></span></div>
     </div>
-    <div id="hero-pred-block" style="display:none;">
+    <div id="hero-pred-main-block" style="display:none;">
       <div class="metric-label" id="hero-pred-label">盤前預測</div>
-      <div class="hero" style="display:flex; align-items:flex-end; flex-wrap:wrap; gap:0 14px;">
-        <span id="hero-pred-range">--</span>
-        <span id="hero-pred-analog-block" style="display:none; flex-direction:column; align-items:flex-start; line-height:1.3;">
-          <span class="metric-label" style="font-size:11px; margin-bottom:2px;">ADR歷史類比推估價位</span>
-          <span id="hero-pred-analog" style="font-size:36px; font-weight:600; color:var(--text-secondary); line-height:1;"></span>
-        </span>
-        <span id="hero-pred-support-block" style="display:none; flex-direction:column; align-items:flex-start; line-height:1.3;">
-          <span class="metric-label" style="font-size:11px; margin-bottom:2px;">支撐價</span>
-          <span id="hero-pred-support" style="font-size:36px; font-weight:600; color:var(--text-secondary); line-height:1;"></span>
-        </span>
-      </div>
+      <div class="hero"><span id="hero-pred-range">--</span></div>
       <div style="font-size:13px; color:var(--up); margin-top:2px;" id="hero-pred-prob"></div>
+    </div>
+    <div id="hero-pred-analog-block" style="display:none;">
+      <div class="metric-label" style="font-size:11px;">ADR歷史類比推估價位</div>
+      <div class="hero" style="font-size:36px; color:var(--text-secondary);"><span id="hero-pred-analog">--</span></div>
+    </div>
+    <div id="hero-pred-support-block" style="display:none;">
+      <div class="metric-label" style="font-size:11px;">支撐價</div>
+      <div class="hero" style="font-size:36px; color:var(--text-secondary);"><span id="hero-pred-support">--</span></div>
     </div>
   </div>
   <div class="metrics" id="metrics-grid"></div>
@@ -709,7 +713,7 @@
       h1DateEl.textContent = (h1DateObj.getUTCMonth()+1) + '月' + h1DateObj.getUTCDate() + '日';
     }
 
-    const block = document.getElementById('hero-pred-block');
+    const block = document.getElementById('hero-pred-main-block');
     if (!pred) { return; } // block預設display:none，維持隱藏即可
 
     block.style.display = '';
@@ -734,7 +738,7 @@
     // (樣本數不足)就整塊連標籤一起隱藏，不要只留標籤配空白數字。
     const analogBlock = document.getElementById('hero-pred-analog-block');
     if (raw.adrAnalogMatches && raw.adrAnalogMatches.avgTwOpenAdjusted != null) {
-      analogBlock.style.display = 'flex';
+      analogBlock.style.display = '';
       document.getElementById('hero-pred-analog').textContent = fmt(raw.adrAnalogMatches.avgTwOpenAdjusted,0) + ' 元';
     }
 
@@ -744,7 +748,7 @@
     // technicalSignal(理論上只有最舊種子資料才會發生)就整塊隱藏。
     const supportBlock = document.getElementById('hero-pred-support-block');
     if (raw.technicalSignal && raw.technicalSignal.levels && raw.technicalSignal.levels.support != null) {
-      supportBlock.style.display = 'flex';
+      supportBlock.style.display = '';
       document.getElementById('hero-pred-support').textContent = fmt(raw.technicalSignal.levels.support,0) + ' 元';
     }
   })();
