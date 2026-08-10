@@ -7,7 +7,7 @@
     --up: #2a78d6; --down: #e34948; --ma5: #eb6834; --ma20: #1baf7a; --ma60: #4a3aa7;
     --bb-fill: rgba(137,135,129,0.12); --macd-hist-pos: rgba(42,120,214,0.55); --macd-hist-neg: rgba(227,73,72,0.55);
     --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --sweet: #1baf7a;
-    --brown: #8a5a2e;
+    --brown: #8a5a2e; --orange: #e07b1a;
     --card-shadow: 0 1px 2px rgba(11,11,11,0.06);
   }
   @media (prefers-color-scheme: dark) {
@@ -17,7 +17,7 @@
       --up: #3987e5; --down: #e66767; --ma5: #d95926; --ma20: #199e70; --ma60: #9085e9;
       --bb-fill: rgba(137,135,129,0.16); --macd-hist-pos: rgba(57,135,229,0.55); --macd-hist-neg: rgba(230,103,103,0.55);
       --good: #0ca30c; --warning: #c98500; --serious: #ec835a; --critical: #e66767; --sweet: #199e70;
-      --brown: #c98a52;
+      --brown: #c98a52; --orange: #f0973a;
     }
   }
   :root[data-theme="dark"] {
@@ -26,7 +26,7 @@
     --up: #3987e5; --down: #e66767; --ma5: #d95926; --ma20: #199e70; --ma60: #9085e9;
     --bb-fill: rgba(137,135,129,0.16); --macd-hist-pos: rgba(57,135,229,0.55); --macd-hist-neg: rgba(230,103,103,0.55);
     --good: #0ca30c; --warning: #c98500; --serious: #ec835a; --critical: #e66767; --sweet: #199e70;
-    --brown: #c98a52;
+    --brown: #c98a52; --orange: #f0973a;
   }
   * { box-sizing: border-box; }
   body {
@@ -138,7 +138,7 @@
       <div style="font-size:13px; color:var(--up); margin-top:2px;" id="hero-pred-prob"></div>
     </div>
     <div id="hero-pred-analog-block" style="display:none; text-align:center;">
-      <div class="metric-label" style="font-size:11px; color:var(--good);">ADR歷史類比推估價位</div>
+      <div class="metric-label" style="font-size:11px; color:var(--orange);">ADR歷史類比推估價位</div>
       <div class="hero" style="font-size:36px; color:var(--text-secondary);"><span id="hero-pred-analog">--</span></div>
     </div>
     <div id="hero-pred-support-block" style="display:none; text-align:center;">
