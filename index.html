@@ -7,6 +7,7 @@
     --up: #2a78d6; --down: #e34948; --ma5: #eb6834; --ma20: #1baf7a; --ma60: #4a3aa7;
     --bb-fill: rgba(137,135,129,0.12); --macd-hist-pos: rgba(42,120,214,0.55); --macd-hist-neg: rgba(227,73,72,0.55);
     --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --sweet: #1baf7a;
+    --brown: #8a5a2e;
     --card-shadow: 0 1px 2px rgba(11,11,11,0.06);
   }
   @media (prefers-color-scheme: dark) {
@@ -16,6 +17,7 @@
       --up: #3987e5; --down: #e66767; --ma5: #d95926; --ma20: #199e70; --ma60: #9085e9;
       --bb-fill: rgba(137,135,129,0.16); --macd-hist-pos: rgba(57,135,229,0.55); --macd-hist-neg: rgba(230,103,103,0.55);
       --good: #0ca30c; --warning: #c98500; --serious: #ec835a; --critical: #e66767; --sweet: #199e70;
+      --brown: #c98a52;
     }
   }
   :root[data-theme="dark"] {
@@ -24,6 +26,7 @@
     --up: #3987e5; --down: #e66767; --ma5: #d95926; --ma20: #199e70; --ma60: #9085e9;
     --bb-fill: rgba(137,135,129,0.16); --macd-hist-pos: rgba(57,135,229,0.55); --macd-hist-neg: rgba(230,103,103,0.55);
     --good: #0ca30c; --warning: #c98500; --serious: #ec835a; --critical: #e66767; --sweet: #199e70;
+    --brown: #c98a52;
   }
   * { box-sizing: border-box; }
   body {
@@ -129,18 +132,18 @@
       <div class="hero" style="font-size:36px;"><span id="hero-price">--</span></div>
       <div><span class="delta" id="hero-delta"></span></div>
     </div>
-    <div id="hero-pred-main-block" style="display:none;">
+    <div id="hero-pred-main-block" style="display:none; text-align:center;">
       <div class="metric-label" id="hero-pred-label">盤前預測</div>
-      <div class="hero"><span id="hero-pred-range">--</span></div>
+      <div class="hero" style="color:var(--brown);"><span id="hero-pred-range">--</span></div>
       <div style="font-size:13px; color:var(--up); margin-top:2px;" id="hero-pred-prob"></div>
     </div>
-    <div id="hero-pred-analog-block" style="display:none;">
+    <div id="hero-pred-analog-block" style="display:none; text-align:center;">
       <div class="metric-label" style="font-size:11px;">ADR歷史類比推估價位</div>
-      <div class="hero" style="font-size:36px; color:var(--text-secondary);"><span id="hero-pred-analog">--</span></div>
+      <div class="hero" style="font-size:36px; color:var(--good);"><span id="hero-pred-analog">--</span></div>
     </div>
-    <div id="hero-pred-support-block" style="display:none;">
+    <div id="hero-pred-support-block" style="display:none; text-align:center;">
       <div class="metric-label" style="font-size:11px;">支撐價</div>
-      <div class="hero" style="font-size:36px; color:var(--text-secondary);"><span id="hero-pred-support">--</span></div>
+      <div class="hero" style="font-size:36px; color:var(--good);"><span id="hero-pred-support">--</span></div>
     </div>
   </div>
   <div class="metrics" id="metrics-grid"></div>
@@ -370,12 +373,17 @@
     const d = r.daily, m = d.length;
     const lastBar = d[m-1];
     let heroPrice = lastBar.close, heroPrevClose = d[m-2] ? d[m-2].close : lastBar.close, liveNote = '';
-    let heroDate = lastBar.date, usedLiveQuote = false;
+    let heroDate = lastBar.date, usedLiveQuote = false, isAfterClose = false;
     if (r.liveQuote && r.liveQuote.date && r.liveQuote.date !== lastBar.date && r.liveQuote.price != null) {
       heroPrice = r.liveQuote.price;
       heroPrevClose = lastBar.close;
       heroDate = r.liveQuote.date;
       usedLiveQuote = true;
+      // 台股一般交易時段固定13:30收盤，liveQuote.time(TWSE MIS原始成交時間，"HH:MM:SS"
+      // 24小時制零填補)只要落在13:30:00(含)之後，代表這筆已經是當天最後成交價、不會再
+      // 變動——即使還沒等到隔天完整重算把它寫進daily陣列，語意上已經是「收盤價」，不是
+      // 「盤中即時價」，字串比較就夠用，不用另外轉時間物件。
+      isAfterClose = (r.liveQuote.time || '') >= '13:30:00';
       const quoteInstant = new Date(r.liveQuote.date + 'T' + (r.liveQuote.time || '00:00:00') + '+08:00');
       const ageMs = Date.now() - quoteInstant.getTime();
       const isFresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs < 15 * 60 * 1000;
@@ -385,10 +393,11 @@
     document.getElementById('hero-price').textContent = fmt(heroPrice,0);
     // heroDate跟heroPrice用同一套if/else決定(liveQuote較新就兩者一起換)，不能各自判斷，
     // 否則價格已經是即時報價、日期卻還停在daily最後一筆會對不起來。usedLiveQuote同一套
-    // 判斷式順便決定「X月X日」後面要標「收盤價」還是「盤中即時價」——這個分支被選中時，
-    // heroPrice本來就是還沒收盤的盤中成交價，標成「收盤價」會誤導使用者。
+    // 判斷式順便決定「X月X日」後面要標「收盤價」還是「盤中即時價」——但只有usedLiveQuote
+    // 且還沒過13:30收盤(!isAfterClose)才真的標「盤中即時價」，過了13:30就算資料還沒寫進
+    // daily陣列，這筆liveQuote實質上已經是當天收盤價，標成「盤中即時價」反而不準確。
     const heroDateObj = new Date(heroDate + 'T00:00:00Z');
-    document.getElementById('hero-date').textContent = (heroDateObj.getUTCMonth()+1) + '月' + heroDateObj.getUTCDate() + '日' + (usedLiveQuote ? ' 盤中即時價' : '收盤價');
+    document.getElementById('hero-date').textContent = (heroDateObj.getUTCMonth()+1) + '月' + heroDateObj.getUTCDate() + '日' + (usedLiveQuote && !isAfterClose ? ' 盤中即時價' : '收盤價');
     const deltaEl = document.getElementById('hero-delta');
     deltaEl.textContent = (chg>0?'+':'') + fmt(chg,2) + ' (' + (chg>0?'+':'') + chgPct + '%)';
     // 顏色刻意不用共用的.delta.up/.delta.down class——那組是給股價相關卡片用的美式配色
