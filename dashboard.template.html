@@ -1043,16 +1043,16 @@
     }
 
     // 夜盤時間窗：t.date是「入帳的下一交易日」，不是開盤日，實際開盤日(15:00)其實是
-    // taifexNightHistory最後一筆(hist最新的一筆)的date——appendTaifexNightHistory只在
-    // 「換到新一場」那一刻才把前一場寫進history(見fetch-market-context.mjs該函式註
-    // 解)，所以hist目前還不包含t這場(還在今天，尚未finalize)；hist最後一筆是「上一場」
-    // 已finalize的session，它自己的官方標示日，剛好就是下一場(也就是t這場)實際開盤的
-    // 那一天(每個交易日固定只有一場夜盤，前後鏈接成連續序列)。
-    // 邊界情況：hist是空陣列(歷史檔案剛建立、還沒有任何一筆)時沒有「上一筆」可用，退
-    // 化成把t.date本身當開盤日——這會少算一段跨假日空隙，但只影響資料剛開始累積的極早
-    // 期，且只是說明文字略有誤差，不影響K線圖本身的數值。
-    const nightStart = hist.length >= 1
-      ? new Date(hist[hist.length - 1].date + 'T00:00:00Z')
+    // taifexNightHistory「上一筆」(hist[hist.length-2]，不是最後一筆)的date——
+    // appendTaifexNightHistory現在改成直接upsert這次抓到的t(2026-08-10起，不再等到
+    // 「換下一場」才寫入，見fetch-market-context.mjs該函式註解)，所以hist最後一筆就是
+    // t自己，要往前推一筆才是「上一場」已finalize的session；它自己的官方標示日，剛好
+    // 就是t這場實際開盤的那一天(每個交易日固定只有一場夜盤，前後鏈接成連續序列)。
+    // 邊界情況：hist不足2筆(歷史檔案剛建立、只有t這一筆)時沒有「上一筆」可用，退化成
+    // 把t.date本身當開盤日——這會少算一段跨假日空隙，但只影響資料剛開始累積的極早期，
+    // 且只是說明文字略有誤差，不影響K線圖本身的數值。
+    const nightStart = hist.length >= 2
+      ? new Date(hist[hist.length - 2].date + 'T00:00:00Z')
       : new Date(t.date + 'T00:00:00Z');
     const nightEnd = new Date(nightStart.getTime() + 24*3600*1000);
     const fmtMD = (dt) => (dt.getUTCMonth()+1) + '/' + dt.getUTCDate();

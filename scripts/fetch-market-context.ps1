@@ -325,14 +325,17 @@ function Get-ChipTrend($Raw) {
 
 # 台指期(TX)夜盤歷史序列：永久保留、逐日累積(跟merge-and-classify.ps1的
 # Update-AdrPremiumHistory同一套read-try/catch→Map upsert-by-date→sort→write模式)，
-# 供「開盤價機率預估」四變數模型(Get-OpenGapModelV4)訓練用。只在「換日」那一刻
-# ($Previous.date -ne $Current.date)才把$Previous這筆append進去——因為$Previous換日後
-# 就確定不會再被Get-TaifexNightClose的校正邏輯改動(校正只發生在「同一個date」的情況)，
-# 此時才是它真正定案、可以永久寫入的時間點；$raw.taifexNightClose目前這筆(還在今天)
-# 則留給明天換日時才寫入，避免把還可能被SettlementPrice校正的暫定值寫死進歷史。
-function Update-TaifexNightHistory($Previous, $Current) {
-    if (-not $Previous -or $null -eq $Previous.close -or $null -eq $Previous.date) { return }
-    if (-not $Current -or $null -eq $Current.date -or $Current.date -eq $Previous.date) { return }
+# 供「開盤價機率預估」四變數模型(Get-OpenGapModelV4)訓練用、以及前端夜盤K線圖顯示用。
+#
+# 直接把這次抓到的$Current($raw.taifexNightClose)upsert進歷史，不等到「換下一場」才寫入
+# (2026-08-10前的舊設計)——夜盤固定05:00收盤，早於「這場」所屬交易日09:00開盤前好幾個
+# 小時，我們06:00排程執行的當下，這場資料早就收盤完畢，沒有理由延後一整個交易日才寫進
+# K線圖。舊設計原本是為了避免把「可能還會被結算價校正」的暫定值寫死，但實測同一場資料
+# 在收盤後不同時間點重複查詢(相隔6小時)數值完全一致，沒有觀察到事後校正的情況；用date
+# 當key upsert，即使被手動重複觸發(renew-2330補跑)也只會覆寫成最新值，不會重複累積或
+# 寫入不一致的資料。
+function Update-TaifexNightHistory($Current) {
+    if (-not $Current -or $null -eq $Current.close -or $null -eq $Current.date) { return }
     $history = @()
     try {
         $history = Get-Content $TxNightHistoryPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -343,13 +346,13 @@ function Update-TaifexNightHistory($Previous, $Current) {
     foreach ($h in $history) { $byDate[$h.date] = $h }
     # open/high/low/volume是後來才加的欄位，種子歷史(使用者提供的CSV回填那384筆)沒有這幾
     # 個值，統一存$null讓欄位形狀固定，前端渲染K線圖時再自行判斷要不要退化處理。
-    $byDate[$Previous.date] = [PSCustomObject]@{
-        date = $Previous.date; close = $Previous.close; changePct = $Previous.changePct; changePts = $Previous.changePts
-        open = $Previous.open; high = $Previous.high; low = $Previous.low; volume = $Previous.volume
+    $byDate[$Current.date] = [PSCustomObject]@{
+        date = $Current.date; close = $Current.close; changePct = $Current.changePct; changePts = $Current.changePts
+        open = $Current.open; high = $Current.high; low = $Current.low; volume = $Current.volume
     }
     $merged = @($byDate.Values | Sort-Object date)
     $merged | ConvertTo-Json -Depth 8 -Compress | Out-File -FilePath $TxNightHistoryPath -Encoding utf8
-    Write-Host "已更新台指期夜盤歷史紀錄: $TxNightHistoryPath（累計 $($merged.Count) 筆，新增/更新 $($Previous.date)）"
+    Write-Host "已更新台指期夜盤歷史紀錄: $TxNightHistoryPath（累計 $($merged.Count) 筆，新增/更新 $($Current.date)）"
 }
 
 function Invoke-Safe($label, [scriptblock]$fn) {
@@ -375,7 +378,7 @@ if (-not $SkipMarketContext) {
 
 $previousTaifexNightClose = $raw.taifexNightClose
 $raw | Add-Member -MemberType NoteProperty -Name "taifexNightClose" -Value (Invoke-Safe "台指期夜盤收盤" { Get-TaifexNightClose $previousTaifexNightClose }) -Force
-Invoke-Safe "台指期夜盤歷史紀錄累積" { Update-TaifexNightHistory $previousTaifexNightClose $raw.taifexNightClose } | Out-Null
+Invoke-Safe "台指期夜盤歷史紀錄累積" { Update-TaifexNightHistory $raw.taifexNightClose } | Out-Null
 
 if (-not $SkipMarketContext) {
     $raw | Add-Member -MemberType NoteProperty -Name "institutionalNet" -Value (Invoke-Safe "三大法人買賣超" { Get-InstitutionalNet $raw.daily }) -Force

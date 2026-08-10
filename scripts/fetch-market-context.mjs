@@ -352,15 +352,17 @@ function classifyChipTrend(raw) {
 
 // 台指期(TX)夜盤歷史序列：永久保留、逐日累積（跟merge-and-classify.mjs的
 // updateAdrPremiumHistory同一套read-try/catch→Map upsert-by-date→sort→write模式），
-// 供「開盤價機率預估」四變數模型(buildOpenGapModelV4)訓練用。這裡只在「換日」那一刻
-// (previous.date !== raw.taifexNightClose.date)才把previous這筆append進去——因為
-// previous換日後就確定不會再被fetchTaifexNightClose的校正邏輯改動了(校正只發生在
-// 「同一個date」的情況)，此時才是它真正定案、可以永久寫入的時間點；raw.taifexNightClose
-// 目前這筆(還在今天)則留給明天換日時才寫入，不提前寫，避免把還可能被SettlementPrice
-// 校正的暫定值寫死進歷史。
-async function appendTaifexNightHistory(previous, current) {
-  if (!previous || previous.close == null || previous.date == null) return;
-  if (!current || current.date == null || current.date === previous.date) return;
+// 供「開盤價機率預估」四變數模型(buildOpenGapModelV4)訓練用、以及前端夜盤K線圖顯示用。
+//
+// 直接把這次抓到的current(raw.taifexNightClose)upsert進歷史，不等到「換下一場」才寫入
+// (2026-08-10前的舊設計)——夜盤固定05:00收盤，早於「這場」所屬交易日09:00開盤前好幾個
+// 小時，我們06:00排程執行的當下，這場資料早就收盤完畢，沒有理由延後一整個交易日才寫進
+// K線圖。舊設計原本是為了避免把「可能還會被結算價校正」的暫定值寫死，但實測同一場資料
+// 在收盤後不同時間點重複查詢(相隔6小時)數值完全一致，沒有觀察到事後校正的情況；用date
+// 當key upsert，即使被手動重複觸發(renew-2330補跑)也只會覆寫成最新值，不會重複累積或
+// 寫入不一致的資料。
+async function appendTaifexNightHistory(current) {
+  if (!current || current.close == null || current.date == null) return;
   let history = [];
   try {
     history = JSON.parse(await readFile(TX_NIGHT_HISTORY_PATH, "utf8"));
@@ -371,19 +373,19 @@ async function appendTaifexNightHistory(previous, current) {
   // open/high/low/volume是後來才加的欄位，種子歷史(使用者提供的CSV回填那384筆)沒有這幾
   // 個值，統一用??null讓欄位形狀固定，前端渲染K線圖時再自行判斷要不要退化處理，不在這裡
   // 硬塞假資料。
-  byDate.set(previous.date, {
-    date: previous.date,
-    close: previous.close,
-    changePct: previous.changePct ?? null,
-    changePts: previous.changePts ?? null,
-    open: previous.open ?? null,
-    high: previous.high ?? null,
-    low: previous.low ?? null,
-    volume: previous.volume ?? null,
+  byDate.set(current.date, {
+    date: current.date,
+    close: current.close,
+    changePct: current.changePct ?? null,
+    changePts: current.changePts ?? null,
+    open: current.open ?? null,
+    high: current.high ?? null,
+    low: current.low ?? null,
+    volume: current.volume ?? null,
   });
   const merged = [...byDate.values()].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   await writeFile(TX_NIGHT_HISTORY_PATH, JSON.stringify(merged), "utf8");
-  console.log(`已更新台指期夜盤歷史紀錄: ${TX_NIGHT_HISTORY_PATH}（累計 ${merged.length} 筆，新增/更新 ${previous.date}）`);
+  console.log(`已更新台指期夜盤歷史紀錄: ${TX_NIGHT_HISTORY_PATH}（累計 ${merged.length} 筆，新增/更新 ${current.date}）`);
 }
 
 async function safe(label, fn) {
@@ -417,7 +419,7 @@ async function main() {
 
   const previousTaifexNightClose = raw.taifexNightClose;
   raw.taifexNightClose = await safe("台指期夜盤收盤", () => fetchTaifexNightClose(previousTaifexNightClose));
-  await safe("台指期夜盤歷史紀錄累積", () => appendTaifexNightHistory(previousTaifexNightClose, raw.taifexNightClose));
+  await safe("台指期夜盤歷史紀錄累積", () => appendTaifexNightHistory(raw.taifexNightClose));
 
   if (!skipMarketContext) {
     raw.institutionalNet = await safe("三大法人買賣超", () => fetchInstitutionalNet(raw.daily));
