@@ -727,11 +727,18 @@
 
     block.style.display = '';
     const labelEl = document.getElementById('hero-pred-label');
+    // CI68區間半寬相對中間值的百分比，讓使用者一眼看出這個68%信賴區間「寬不寬」
+    // （半寬越大代表模型對這次預測越不確定）；中間值=(low+high)/2，半寬%=
+    // (high-low)/2/中間值*100，用跟其他百分比欄位一致的fmt(...,1)取到小數點後1位。
+    const ci68MidPct = (pred.ci68 && pred.ci68.low != null && pred.ci68.high != null)
+      ? (pred.ci68.high - pred.ci68.low) / 2 / ((pred.ci68.low + pred.ci68.high) / 2) * 100
+      : null;
+    const ci68Suffix = ci68MidPct != null ? '（CI68 中間值±' + fmt(ci68MidPct, 1) + '%）' : '';
     if (pred.forDate) {
       const dObj = new Date(pred.forDate + 'T00:00:00Z');
-      labelEl.textContent = (dObj.getUTCMonth()+1) + '月' + dObj.getUTCDate() + '日盤前預測';
+      labelEl.textContent = (dObj.getUTCMonth()+1) + '月' + dObj.getUTCDate() + '日盤前預測' + ci68Suffix;
     } else {
-      labelEl.textContent = '盤前預測';
+      labelEl.textContent = '盤前預測' + ci68Suffix;
     }
     // 直接複用「盤前股價預測」卡片同一套68%信賴區間格式(低~高)，不重新設計呈現法，
     // 保證頂部摘要跟下方詳細卡片顯示的是同一組數字。這裡不做分歧箭頭那套疊加符號
