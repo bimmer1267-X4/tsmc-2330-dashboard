@@ -727,13 +727,15 @@
 
     block.style.display = '';
     const labelEl = document.getElementById('hero-pred-label');
-    // CI68區間半寬相對中間值的百分比，讓使用者一眼看出這個68%信賴區間「寬不寬」
-    // （半寬越大代表模型對這次預測越不確定）；中間值=(low+high)/2，半寬%=
-    // (high-low)/2/中間值*100，用跟其他百分比欄位一致的fmt(...,1)取到小數點後1位。
-    const ci68MidPct = (pred.ci68 && pred.ci68.low != null && pred.ci68.high != null)
-      ? (pred.ci68.high - pred.ci68.low) / 2 / ((pred.ci68.low + pred.ci68.high) / 2) * 100
+    // CI68中間值(區間正中央的價位)＋半寬相對中間值的百分比，讓使用者一眼看出這個68%
+    // 信賴區間「中心在哪、寬不寬」（半寬越大代表模型對這次預測越不確定）；中間值=
+    // (low+high)/2，半寬%=(high-low)/2/中間值*100，跟其他價格/百分比欄位一樣分別用
+    // fmt(...,0)/fmt(...,1)取整數元跟小數點後1位。
+    const ci68Mid = (pred.ci68 && pred.ci68.low != null && pred.ci68.high != null)
+      ? (pred.ci68.low + pred.ci68.high) / 2
       : null;
-    const ci68Suffix = ci68MidPct != null ? '（CI68 中間值±' + fmt(ci68MidPct, 1) + '%）' : '';
+    const ci68MidPct = ci68Mid != null ? (pred.ci68.high - pred.ci68.low) / 2 / ci68Mid * 100 : null;
+    const ci68Suffix = ci68Mid != null ? '（CI68 中間值' + fmt(ci68Mid, 0) + '元±' + fmt(ci68MidPct, 1) + '%）' : '';
     if (pred.forDate) {
       const dObj = new Date(pred.forDate + 'T00:00:00Z');
       labelEl.textContent = (dObj.getUTCMonth()+1) + '月' + dObj.getUTCDate() + '日盤前預測' + ci68Suffix;
