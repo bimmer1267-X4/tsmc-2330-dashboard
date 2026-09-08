@@ -8,6 +8,13 @@ $ErrorActionPreference = "Stop"
 $UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 $DataPath = Join-Path $PSScriptRoot "..\data\data.json"
 
+# 實測發現 TWSE MIS API 三不五時會出現連線層級的暫時性錯誤（連線被對方重置），跟
+# 「非交易時段沒有報價」是不同性質的問題——這種屬於偶發的網路抖動，通常隔幾秒
+# 重試就會恢復，不該讓整個 workflow 直接失敗。加上簡單的重試+退避，多給幾次機會；
+# 如果重試完還是失敗，才讓錯誤往外拋，交由呼叫端判定為真正的異常。
+$FetchMaxAttempts = 3
+$FetchRetryDelaySec = 3
+
 function ConvertTo-Num($s) {
     if ($null -eq $s) { return $null }
     $t = ($s -replace ",", "").Trim()
@@ -17,17 +24,36 @@ function ConvertTo-Num($s) {
     return $null
 }
 
+# 對 TWSE MIS API 發出請求並解析 JSON，遇到連線層級的暫時性錯誤或 HTTP 失敗時
+# 會重試最多 $FetchMaxAttempts 次（每次間隔遞增），全部重試完仍失敗才把最後一次
+# 的錯誤往外拋。
+function Get-StockInfoJson($url) {
+    $lastErr = $null
+    for ($attempt = 1; $attempt -le $FetchMaxAttempts; $attempt++) {
+        try {
+            $resp = Invoke-WebRequest -Uri $url -UserAgent $UA -TimeoutSec 30 -UseBasicParsing
+            $bytes = $resp.RawContentStream.ToArray()
+            $text = [System.Text.Encoding]::UTF8.GetString($bytes)
+            return ($text | ConvertFrom-Json)
+        } catch {
+            $lastErr = $_
+            if ($attempt -lt $FetchMaxAttempts) {
+                Write-Warning "抓取即時報價第${attempt}次嘗試失敗（$($_.Exception.Message)），$($FetchRetryDelaySec * $attempt)秒後重試..."
+                Start-Sleep -Seconds ($FetchRetryDelaySec * $attempt)
+            }
+        }
+    }
+    throw $lastErr
+}
+
 # 回傳 $null 代表「今天大概不是交易日／目前沒有可用報價」，這是預期內會發生的情況
 # （例如國定假日排程照樣每5分鐘觸發一次），呼叫端應該安靜跳過，不要當成錯誤讓
 # workflow 失敗——不然遇到連續假期，Actions 頁面會整天被同一個原因的紅色 X 洗版。
-# 真正的錯誤（HTTP 失敗、JSON 格式不對）還是照樣 throw，讓 workflow 顯示失敗，
-# 因為那種才是真的需要留意的異常。
+# 真正的錯誤（重試後仍HTTP失敗、JSON格式不對）還是照樣 throw，讓 workflow 顯示
+# 失敗，因為那種才是真的需要留意的異常。
 function Get-LiveQuote {
     $url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_2330.tw&json=1&delay=0"
-    $resp = Invoke-WebRequest -Uri $url -UserAgent $UA -TimeoutSec 30 -UseBasicParsing
-    $bytes = $resp.RawContentStream.ToArray()
-    $text = [System.Text.Encoding]::UTF8.GetString($bytes)
-    $json = $text | ConvertFrom-Json
+    $json = Get-StockInfoJson $url
 
     if (-not $json.msgArray -or $json.msgArray.Count -eq 0) {
         return $null

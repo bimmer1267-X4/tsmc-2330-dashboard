@@ -11,6 +11,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_PATH = join(__dirname, "..", "data", "data.json");
 const UA = "Mozilla/5.0 (compatible; tsmc-2330-dashboard/1.0)";
 
+// 實測發現 TWSE MIS API 三不五時會出現連線層級的暫時性錯誤（TLS連線被對方重置，
+// Node fetch 直接拋出 `TypeError: fetch failed` + cause ECONNRESET），跟「非交易
+// 時段沒有報價」是不同性質的問題——這種屬於偶發的網路抖動，通常隔幾秒重試就會
+// 恢復，不該讓整個 workflow 直接失敗。加上簡單的重試+退避，多給幾次機會；如果
+// 重試完還是失敗，才讓錯誤往外拋，交由呼叫端判定為真正的異常。
+const FETCH_MAX_ATTEMPTS = 3;
+const FETCH_RETRY_DELAY_MS = 3000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function toNum(s) {
   if (s === null || s === undefined) return null;
   const t = String(s).replace(/,/g, "").trim();
@@ -19,16 +31,37 @@ function toNum(s) {
   return Number.isFinite(v) ? v : null;
 }
 
+// 對 TWSE MIS API 發出請求並解析 JSON，遇到連線層級的暫時性錯誤（ECONNRESET等）
+// 或 HTTP 非 2xx 時會重試最多 FETCH_MAX_ATTEMPTS 次（每次間隔遞增），全部重試
+// 完仍失敗才把最後一次的錯誤往外拋。
+async function fetchStockInfoJson(url) {
+  let lastErr;
+  for (let attempt = 1; attempt <= FETCH_MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": UA } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < FETCH_MAX_ATTEMPTS) {
+        console.warn(
+          `抓取即時報價第${attempt}次嘗試失敗（${err.message}），${FETCH_RETRY_DELAY_MS / 1000}秒後重試...`
+        );
+        await sleep(FETCH_RETRY_DELAY_MS * attempt);
+      }
+    }
+  }
+  throw lastErr;
+}
+
 // 回傳 null 代表「今天大概不是交易日／目前沒有可用報價」，這是預期內會發生的情況
 // （例如國定假日排程照樣每5分鐘觸發一次），呼叫端應該安靜跳過，不要當成錯誤讓
 // workflow 失敗——不然遇到連續假期，Actions 頁面會整天被同一個原因的紅色 X 洗版。
-// 真正的錯誤（HTTP 失敗、JSON 格式不對）還是照樣 throw，讓 workflow 顯示失敗，
-// 因為那種才是真的需要留意的異常。
+// 真正的錯誤（重試後仍HTTP失敗、JSON格式不對）還是照樣 throw，讓 workflow 顯示
+// 失敗，因為那種才是真的需要留意的異常。
 async function fetchLiveQuote() {
   const url = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_2330.tw&json=1&delay=0";
-  const res = await fetch(url, { headers: { "User-Agent": UA } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const json = await res.json();
+  const json = await fetchStockInfoJson(url);
   const item = json.msgArray && json.msgArray[0];
   if (!item) return null;
 
