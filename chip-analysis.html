@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>台積電(2330) AI籌碼面分析</title>
+<script>if (window.self !== window.top) document.documentElement.classList.add('embedded');</script>
 <style>
   :root {
     --surface-1: #fcfcfb; --page: #f9f9f7; --text-primary: #0b0b0b; --text-secondary: #52514e;
@@ -11,6 +12,7 @@
     --up: #2a78d6; --down: #e34948;
     --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
     --card-shadow: 0 1px 2px rgba(11,11,11,0.06);
+    --nav-accent: #e8501e; --nav-accent-soft: #fdeee7; --nav-inset: 530px;
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) {
@@ -18,6 +20,7 @@
       --muted: #898781; --border: rgba(255,255,255,0.10);
       --up: #3987e5; --down: #e66767;
       --good: #0ca30c; --warning: #c98500; --critical: #e66767;
+      --nav-accent: #f0703f; --nav-accent-soft: rgba(240,112,63,0.16);
     }
   }
   :root[data-theme="dark"] {
@@ -25,6 +28,7 @@
     --muted: #898781; --border: rgba(255,255,255,0.10);
     --up: #3987e5; --down: #e66767;
     --good: #0ca30c; --warning: #c98500; --critical: #e66767;
+    --nav-accent: #f0703f; --nav-accent-soft: rgba(240,112,63,0.16);
   }
   * { box-sizing: border-box; }
   body {
@@ -38,12 +42,57 @@
   .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--warning); color: #1a1200; margin-bottom: 12px; }
   .analysis-body { font-size: 15px; line-height: 1.9; white-space: pre-wrap; }
   .placeholder { color: var(--text-secondary); font-size: 14px; }
-  .back-link { display: inline-block; margin-top: 20px; font-size: 13px; color: var(--up); text-decoration: none; }
-  .back-link:hover { text-decoration: underline; }
   .disclaimer { color: var(--muted); font-size: 11px; margin-top: 16px; }
+  /* 頂部選單列（index.html 與 chip-analysis.html 共用同一份樣式）。body 有 max-width
+     與 20px padding，選單/深色帶用負 margin 撐滿整個視窗寬，內容再用 padding 對齊下方卡片
+     （--nav-inset = body max-width 的一半減掉 body padding）。被嵌在 iframe 裡時
+     （例如舊 shunshun.dev 外框）由 <html class="embedded"> 隱藏，
+     避免出現兩層選單。overflow-x:clip 吸收 100vw 含捲軸寬度造成的水平溢出，且不像
+     hidden 會讓 position:sticky 失效。 */
+  html { overflow-x: clip; }
+  .site-nav, .site-band { margin-inline: calc(50% - 50vw); padding-inline: max(20px, calc(50vw - var(--nav-inset))); }
+  .site-nav {
+    position: sticky; top: 0; z-index: 900; margin-top: -20px;
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 24px;
+    padding-block: 14px; background: var(--surface-1); border-bottom: 3px solid var(--nav-accent);
+  }
+  .site-brand { display: inline-flex; align-items: center; gap: 8px; font-size: 22px; font-weight: 800; color: var(--nav-accent); text-decoration: none; white-space: nowrap; }
+  .site-logo { font-size: 24px; line-height: 1; }
+  .site-menu { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  .site-menu a {
+    position: relative; padding: 9px 16px; border-radius: 10px; font-size: 15px; font-weight: 700;
+    color: var(--text-primary); text-decoration: none; white-space: nowrap;
+    transition: background-color .25s ease, color .25s ease, transform .25s ease;
+  }
+  .site-menu a::after {
+    content: ""; position: absolute; left: 16px; right: 16px; bottom: 4px; height: 2px; border-radius: 1px;
+    background: var(--nav-accent); transform: scaleX(0); transition: transform .25s ease;
+  }
+  .site-menu a:hover, .site-menu a:focus-visible { background: var(--nav-accent-soft); color: var(--nav-accent); transform: translateY(-1px); }
+  .site-menu a:hover::after, .site-menu a:focus-visible::after { transform: scaleX(1); }
+  .site-menu a[aria-current="page"] { background: var(--nav-accent-soft); color: var(--nav-accent); }
+  .site-menu a[aria-current="page"]::after { transform: scaleX(0); }
+  .site-band { height: 10px; background: #0b0b14; margin-bottom: 16px; }
+  .embedded .site-nav, .embedded .site-band { display: none; }
+  @media (max-width: 640px) {
+    .site-brand { font-size: 18px; }
+    .site-logo { font-size: 20px; }
+    .site-menu { width: 100%; }
+    .site-menu a { padding: 8px 12px; font-size: 14px; }
+    .site-menu a::after { left: 12px; right: 12px; }
+  }
 </style>
 </head>
 <body>
+<header class="site-nav">
+  <a class="site-brand" href="index.html"><span class="site-logo">📈</span>TSMC（2330）盤前評估儀表板</a>
+  <nav class="site-menu" aria-label="主選單">
+    <a href="index.html">台積電盤前股價預測</a>
+    <a href="chip-analysis.html" aria-current="page">AI盤前籌碼分析</a>
+    <a href="https://tw.stock.yahoo.com/" target="_blank" rel="noopener">股市最新財經</a>
+  </nav>
+</header>
+<div class="site-band"></div>
   <div class="card">
     <h1>台積電(2330) AI籌碼面分析</h1>
     <div class="sub">最後更新時間：<span id="updated-at">2026-10-23 11:03</span>（台灣時間）</div>
@@ -54,14 +103,6 @@
 
 國際指標方面，美股費城半導體指數(SOX)夜盤重挫6.72%，為近期最大單日跌幅，加權指數同日下跌1.81%，顯示國際半導體股劇烈震盪已開始牽動台股情緒。整體而言，SOX重挫、外資賣超回升、融資水位仍高三項訊號疊加，先前的修復行情面臨考驗，短線宜密切觀察台積電能否守住近期支撐，並留意融資部位是否伴隨股價走弱而鬆動。</div>
     <div class="disclaimer">＊本頁內容為AI依當日籌碼面與大盤指數數據生成之敘事分析，僅供參考，不構成投資建議。</div>
-    <a class="back-link" href="./" id="back-link">← 返回儀表板</a>
   </div>
-  <script>
-    // 被嵌在主頁面的視窗框架(modal iframe)裡時，返回連結沒有意義（modal只提供關閉），直接隱藏
-    if (window.self !== window.top) {
-      var el = document.getElementById('back-link');
-      if (el) el.style.display = 'none';
-    }
-  </script>
 </body>
 </html>

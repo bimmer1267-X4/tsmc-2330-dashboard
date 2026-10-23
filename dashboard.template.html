@@ -1,4 +1,5 @@
 <meta charset="utf-8">
+<script>if (window.self !== window.top) document.documentElement.classList.add('embedded');</script>
 <title>台積電(2330) 買賣評估儀表板</title>
 <style>
   :root {
@@ -8,6 +9,7 @@
     --bb-fill: rgba(137,135,129,0.12); --macd-hist-pos: rgba(42,120,214,0.55); --macd-hist-neg: rgba(227,73,72,0.55);
     --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --sweet: #1baf7a;
     --brown: #8a5a2e; --orange: #e07b1a;
+    --nav-accent: #e8501e; --nav-accent-soft: #fdeee7; --nav-inset: 530px;
     --card-shadow: 0 1px 2px rgba(11,11,11,0.06);
   }
   @media (prefers-color-scheme: dark) {
@@ -18,6 +20,7 @@
       --bb-fill: rgba(137,135,129,0.16); --macd-hist-pos: rgba(57,135,229,0.55); --macd-hist-neg: rgba(230,103,103,0.55);
       --good: #0ca30c; --warning: #c98500; --serious: #ec835a; --critical: #e66767; --sweet: #199e70;
       --brown: #c98a52; --orange: #f0973a;
+      --nav-accent: #f0703f; --nav-accent-soft: rgba(240,112,63,0.16);
     }
   }
   :root[data-theme="dark"] {
@@ -27,6 +30,7 @@
     --bb-fill: rgba(137,135,129,0.16); --macd-hist-pos: rgba(57,135,229,0.55); --macd-hist-neg: rgba(230,103,103,0.55);
     --good: #0ca30c; --warning: #c98500; --serious: #ec835a; --critical: #e66767; --sweet: #199e70;
     --brown: #c98a52; --orange: #f0973a;
+    --nav-accent: #f0703f; --nav-accent-soft: rgba(240,112,63,0.16);
   }
   * { box-sizing: border-box; }
   body {
@@ -51,20 +55,6 @@
   .trend-summary.down .verdict { color: var(--critical); }
   .trend-summary .reasons { color: var(--text-secondary); margin-top: 4px; }
   .trend-summary .risk { color: var(--warning); margin-top: 4px; font-size: 12px; }
-  /* 用 position:fixed 當背景遮罩沒問題（在任何情況下都能蓋住目前可視範圍），
-     但 .modal-box 改用 position:absolute（文件座標）而非 fixed+置中：
-     這個頁面常被 shunshun.dev 用「不能內部捲動、高度=內容全長」的方式嵌成
-     iframe，此時 iframe 自己的「viewport」等於整份文件的高度，若用
-     fixed+置中，彈窗會被置中在「整份文件」的中間，而不是使用者目前實際
-     捲動到、看得到的那一小段畫面，導致彈窗跳出來的位置在很下面要另外
-     捲動才看得到。改成 absolute 並由 JS 在開啟當下定位到觸發連結所在的
-     文件座標，就能保證彈窗一定出現在使用者剛剛點擊、當下看得到的位置。 */
-  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 1000; }
-  .modal-overlay.open { display: block; }
-  .modal-box { background: var(--surface-1); border-radius: 12px; width: calc(100% - 40px); max-width: 820px; height: 480px; max-height: 80vh; position: absolute; left: 50%; transform: translateX(-50%); box-shadow: 0 12px 40px rgba(0,0,0,0.35); overflow: hidden; }
-  .modal-close { position: absolute; top: 10px; right: 10px; width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); font-size: 16px; line-height: 1; cursor: pointer; z-index: 1; display: flex; align-items: center; justify-content: center; }
-  .modal-close:hover { background: var(--page); }
-  .modal-box iframe { width: 100%; height: 100%; border: none; display: block; }
   #back-to-top { position: fixed; right: 20px; bottom: 20px; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); box-shadow: var(--card-shadow); font-size: 20px; line-height: 1; cursor: pointer; z-index: 500; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.2s; }
   #back-to-top.visible { opacity: 1; pointer-events: auto; display: flex; }
   #back-to-top:hover { background: var(--page); }
@@ -115,7 +105,55 @@
   .etf-table td:last-child, .etf-table th:last-child { text-align: right; font-variant-numeric: tabular-nums; }
   .etf-table tbody tr:hover { background: var(--page); }
   .etf-weight { display: inline-block; padding: 2px 9px; border-radius: 999px; font-weight: 700; font-size: 12px; background: rgba(227,73,72,0.12); color: var(--down); }
+  /* 頂部選單列（index.html 與 chip-analysis.html 共用同一份樣式）。body 有 max-width
+     與 20px padding，選單/深色帶用負 margin 撐滿整個視窗寬，內容再用 padding 對齊下方卡片
+     （--nav-inset = body max-width 的一半減掉 body padding）。被嵌在 iframe 裡時
+     （例如舊 shunshun.dev 外框）由 <html class="embedded"> 隱藏，
+     避免出現兩層選單。overflow-x:clip 吸收 100vw 含捲軸寬度造成的水平溢出，且不像
+     hidden 會讓 position:sticky 失效。 */
+  html { overflow-x: clip; }
+  .site-nav, .site-band { margin-inline: calc(50% - 50vw); padding-inline: max(20px, calc(50vw - var(--nav-inset))); }
+  .site-nav {
+    position: sticky; top: 0; z-index: 900; margin-top: -20px;
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 24px;
+    padding-block: 14px; background: var(--surface-1); border-bottom: 3px solid var(--nav-accent);
+  }
+  .site-brand { display: inline-flex; align-items: center; gap: 8px; font-size: 22px; font-weight: 800; color: var(--nav-accent); text-decoration: none; white-space: nowrap; }
+  .site-logo { font-size: 24px; line-height: 1; }
+  .site-menu { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  .site-menu a {
+    position: relative; padding: 9px 16px; border-radius: 10px; font-size: 15px; font-weight: 700;
+    color: var(--text-primary); text-decoration: none; white-space: nowrap;
+    transition: background-color .25s ease, color .25s ease, transform .25s ease;
+  }
+  .site-menu a::after {
+    content: ""; position: absolute; left: 16px; right: 16px; bottom: 4px; height: 2px; border-radius: 1px;
+    background: var(--nav-accent); transform: scaleX(0); transition: transform .25s ease;
+  }
+  .site-menu a:hover, .site-menu a:focus-visible { background: var(--nav-accent-soft); color: var(--nav-accent); transform: translateY(-1px); }
+  .site-menu a:hover::after, .site-menu a:focus-visible::after { transform: scaleX(1); }
+  .site-menu a[aria-current="page"] { background: var(--nav-accent-soft); color: var(--nav-accent); }
+  .site-menu a[aria-current="page"]::after { transform: scaleX(0); }
+  .site-band { height: 10px; background: #0b0b14; margin-bottom: 16px; }
+  .embedded .site-nav, .embedded .site-band { display: none; }
+  @media (max-width: 640px) {
+    .site-brand { font-size: 18px; }
+    .site-logo { font-size: 20px; }
+    .site-menu { width: 100%; }
+    .site-menu a { padding: 8px 12px; font-size: 14px; }
+    .site-menu a::after { left: 12px; right: 12px; }
+  }
 </style>
+
+<header class="site-nav">
+  <a class="site-brand" href="index.html"><span class="site-logo">📈</span>TSMC（2330）盤前評估儀表板</a>
+  <nav class="site-menu" aria-label="主選單">
+    <a href="index.html" aria-current="page">台積電盤前股價預測</a>
+    <a href="chip-analysis.html">AI盤前籌碼分析</a>
+    <a href="https://tw.stock.yahoo.com/" target="_blank" rel="noopener">股市最新財經</a>
+  </nav>
+</header>
+<div class="site-band"></div>
 
 <div class="card">
   <h1><span id="h1-date-label"></span>台積電2330盤前摘要整理（更新時間：<span id="h1-updated-at">--</span>）</h1>
@@ -168,19 +206,11 @@
 <div class="card" id="market-context-card">
   <div style="display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:4px 12px; margin-bottom:2px;">
     <div style="font-weight:600;">籌碼面與大盤指數 <span style="font-weight:400; font-size:12px; color:var(--muted);">更新時間：<span class="card-updated-at">--</span></span></div>
-    <a href="chip-analysis.html" id="chip-analysis-link" style="font-size:13px; color:var(--up); text-decoration:none; cursor:pointer; white-space:nowrap;">📊 查看AI籌碼面分析摘要 →</a>
   </div>
   <div class="sub" id="market-context-sub">三大法人買賣超、融資融券、選擇權未平倉、費半/加權指數對照，輔助判斷市場氣氛與資金流向；任一來源當天若抓取失敗，該項目會顯示「—」</div>
   <div class="sub" id="market-context-freshness" style="margin-top:-10px; font-size:12px; color:var(--muted);"></div>
   <div class="trend-summary" id="market-context-summary"></div>
   <div class="metrics" id="market-context-grid"></div>
-</div>
-
-<div class="modal-overlay" id="chip-analysis-modal-overlay">
-  <div class="modal-box" id="chip-analysis-modal-box">
-    <button class="modal-close" id="chip-analysis-modal-close" aria-label="關閉" type="button">✕</button>
-    <iframe id="chip-analysis-modal-iframe" title="AI籌碼面分析"></iframe>
-  </div>
 </div>
 
 <div class="card" id="open-prediction-card">
@@ -1762,35 +1792,6 @@
     fetchLiveQuoteDirect();
     setInterval(fetchLiveQuoteDirect, 60000);
   })();
-})();
-
-// AI籌碼面分析：點連結不開新分頁，改用簡易視窗框架（iframe modal）顯示，
-// 只保留關閉功能，不做網址列/前進後退等瀏覽器導覽功能。
-(function () {
-  const link = document.getElementById('chip-analysis-link');
-  const overlay = document.getElementById('chip-analysis-modal-overlay');
-  const box = document.getElementById('chip-analysis-modal-box');
-  const iframe = document.getElementById('chip-analysis-modal-iframe');
-  const closeBtn = document.getElementById('chip-analysis-modal-close');
-  if (!link || !overlay || !box || !iframe || !closeBtn) return;
-  function openModal(e) {
-    e.preventDefault();
-    iframe.src = 'chip-analysis.html';
-    // 定位到連結目前在文件中的位置，確保彈窗一定出現在使用者當下看得到的地方
-    // （不能單純用 CSS 置中，被嵌成不能內部捲動的高度自適應 iframe 時置中基準
-    // 會是整份文件而不是目前可視範圍，見上方 CSS 註解）
-    const linkTop = link.getBoundingClientRect().top + (window.scrollY || window.pageYOffset || 0);
-    box.style.top = Math.max(16, linkTop - 30) + 'px';
-    overlay.classList.add('open');
-  }
-  function closeModal() {
-    overlay.classList.remove('open');
-    iframe.src = '';
-  }
-  link.addEventListener('click', openModal);
-  closeBtn.addEventListener('click', closeModal);
-  overlay.addEventListener('click', function (e) { if (e.target === overlay) closeModal(); });
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && overlay.classList.contains('open')) closeModal(); });
 })();
 
 // 回到頂部按鈕：往下捲動超過一定距離才顯示，點擊平滑捲回頂部
